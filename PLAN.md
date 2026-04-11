@@ -511,6 +511,101 @@ it. If Claude needs additional schema research, spin up a temporary container:
 
 ---
 
+## Appendix — notes from Phase 1 (2026-04-11)
+
+**Status: Phase 1 complete.** `cargo run --example dump_db` parses all 9
+primary-type tables plus `tag` cleanly on first run against
+`test-fixtures/sample.db`. No struct edits were needed after the initial
+definitions — the sample JSON matches what was reconstructed from the
+sample embedded in this plan.
+
+### Parse coverage (sample.db)
+
+| Table      | Rows | Parsed |
+|------------|------|--------|
+| person     | 48   | yes    |
+| family     | 18   | yes    |
+| event      | 13   | yes    |
+| place      | 5    | yes    |
+| source     | 5    | yes    |
+| citation   | 3    | yes    |
+| media      | 0    | (no rows) |
+| note       | 1    | yes    |
+| repository | 0    | (no rows) |
+| tag        | 2    | yes    |
+
+Media and repository have zero rows in this fixture. The structs compile
+and match what's documented in Gramps core, but they are not proven by
+real data yet. **First Phase 2 task** should either (a) add synthetic rows
+via a bigger fixture tree or (b) round-trip parse against a fresh export
+of the actual running `gramps_gramps_db` volume.
+
+### Research findings
+
+**1. Schema / DB version.** The `metadata` table has a `version` setting
+with value `{"type":"str","value":"21"}`. Schema version `21` corresponds
+to Gramps 6.0.x. When we start enforcing compatibility (Phase 7) we'll
+refuse to open any tree whose `metadata.version` is not `21`, and document
+the upgrade path out-of-band.
+
+**2. `reference` table maintenance.** No SQLite triggers exist on the
+`reference` table (verified via `.schema` — only indexes, no `CREATE
+TRIGGER`). Gramps core maintains this table in application code
+(`gen/db/generic.py`). Our write path must do the same: on every primary
+object write, diff the old vs new cross-reference list and rewrite the
+rows in `reference`. See `ReferenceRepo::rebuild_for(obj_handle)` design
+in PLAN.md risk #4.
+
+**3. Enum mappings.** All tagged-enum value tables that appear in the
+sample are hardcoded in `src/gramps/enums.rs` (EventType, EventRoleType,
+NameType, NameOriginType, FamilyRelType, ChildRefType, PlaceType, NoteType,
+AttributeType, SourceMediaType, UrlType, RepositoryType, plus Date's
+calendar/modifier/quality scalars). Labels are English and untranslated.
+Not yet covered: MarkerType (deprecated, unused in the sample); the full
+long tail of NoteType beyond values 1–9 (sample only uses value 1 =
+General). Add more entries when the running tree exposes them.
+
+**4. Sidecar files.** Not verified in this session — need to inspect the
+Docker volume directory to see which of `database.txt`, `meta_data.db`,
+`undo.db`, `name.txt`, `.lck` actually exist. Deferred to Phase 7 file-lock
+work, which is where this matters. Flagged in PLAN.md risk #1 as the
+reason Phase 1–6 must not be run against the live tree — the lock
+protocol is not implemented yet.
+
+**5. Date shape.** All dates in the sample use the 4-tuple `dateval` form
+`[day, month, year, slash]`. The 8-tuple range form is handled by
+`DateVal::Range` but is not exercised by the fixture. Observed modifiers
+were 0 (none) and 3 (about). Observed qualities were all 0 (regular).
+The `year` field at the top level of Date is present on events and
+place-names but not on the empty dates inside Name / Citation — modeled
+as `Option<i32>` with `#[serde(default)]`.
+
+### Deviations from the plan
+
+- **Dependency set.** Phase 1 only adds `rusqlite`, `serde`, `serde_json`,
+  `anyhow`, `thiserror`, plus `pretty_assertions` as a dev-dep. `iced`,
+  `rfd`, `tokio`, `chrono`, `tracing`, `uuid`, `dirs` are deferred to the
+  phases that actually need them. Rationale: keeps the `cargo build`
+  iteration loop fast while working on the data model. Phase 2 will add
+  `iced`, `rfd`, `tracing`, `tracing-subscriber`.
+- **`Tag`.** PLAN.md lists 9 primary types but dump_db also parses `tag`
+  for coverage; Tag has its own primary table and is trivially
+  round-trippable.
+
+### Exit criterion: met
+
+> `cargo run --example dump_db` against `test-fixtures/sample.db` parses
+> all 9 primary types cleanly.
+
+```
+== OK — every row in every primary table parsed cleanly ==
+```
+
+Next session picks up at Phase 2 ("Read-only UI skeleton") — stop here
+per the `/clear` resume prompt.
+
+---
+
 *This plan is self-contained. A fresh Claude context reading only this file
 plus the sample DB should be able to execute Phase 1 without additional
 guidance. If you find gaps while executing, update this file first, then code.*

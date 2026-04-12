@@ -149,9 +149,12 @@ pub struct App {
     sidebar_visible: bool,
     /// Whether the "Browse all" section in the sidebar is expanded.
     browse_expanded: bool,
-    /// Whether the inline search bar in the top bar is active.
-    search_bar_active: bool,
-    /// The current query in the inline search bar.
+    /// Display mode toggle: false = tree/map layout, true = flat list.
+    /// Applies to whichever view is currently active (Family Tree or
+    /// Full Network). The toggle button says "List" or "Tree"
+    /// depending on current state.
+    list_mode: bool,
+    /// The current query in the sidebar search bar.
     search_bar_query: String,
 
     error: Option<String>,
@@ -393,9 +396,9 @@ pub enum Message {
     ToggleSidebar,
     /// Toggle the "Browse all" section in the sidebar.
     ToggleBrowse,
-    /// Toggle the inline search bar.
-    SearchBarToggle,
-    /// Typing in the inline search bar.
+    /// Toggle between tree and list display mode.
+    ToggleListMode,
+    /// Typing in the sidebar search bar.
     SearchBarInput(String),
     /// Hit Enter in the search bar - jump to best match.
     SearchBarSubmit,
@@ -559,7 +562,7 @@ impl App {
                 pending_add: None,
                 sidebar_visible: false,
                 browse_expanded: false,
-                search_bar_active: false,
+                list_mode: false,
                 search_bar_query: String::new(),
                 error: None,
                 loading,
@@ -634,6 +637,8 @@ impl App {
             }
             Message::ShowView(view) => {
                 self.current = view;
+                // Reset display mode to each view's natural default.
+                self.list_mode = false;
                 Task::none()
             }
             Message::SearchChanged(q) => {
@@ -775,11 +780,8 @@ impl App {
                 self.browse_expanded = !self.browse_expanded;
                 Task::none()
             }
-            Message::SearchBarToggle => {
-                self.search_bar_active = !self.search_bar_active;
-                if !self.search_bar_active {
-                    self.search_bar_query.clear();
-                }
+            Message::ToggleListMode => {
+                self.list_mode = !self.list_mode;
                 Task::none()
             }
             Message::SearchBarInput(q) => {
@@ -800,7 +802,6 @@ impl App {
                         }
                     }
                 }
-                self.search_bar_active = false;
                 self.search_bar_query.clear();
                 Task::none()
             }
@@ -1461,12 +1462,8 @@ impl App {
         };
 
         let menu_label = if self.sidebar_visible { "Close" } else { "Menu" };
-        let view_label = if self.current == View::Tree { "List" } else { "Tree" };
-        let view_msg = if self.current == View::Tree {
-            Message::ShowView(View::Persons)
-        } else {
-            Message::ShowView(View::Tree)
-        };
+        let view_label = if self.list_mode { "Tree" } else { "List" };
+        let view_msg = Message::ToggleListMode;
 
         // Left padding to clear macOS traffic lights.
         let mut menu_bar = row![
@@ -1486,21 +1483,30 @@ impl App {
         }
 
         let body: Element<'_, Message> = match &self.snapshot {
-            Some(snap) if self.current == View::Tree => {
-                let tree_body = match &self.home_person {
-                    Some(h) => tree::view(
-                        snap,
-                        h,
-                        self.context_target.as_deref(),
-                    ),
+            Some(snap) if matches!(self.current, View::Tree | View::Network) => {
+                let content_body = match &self.home_person {
+                    Some(h) => {
+                        // Tree view defaults to tree layout; Network defaults to list.
+                        // list_mode flips the default for each.
+                        let use_tree_layout = match self.current {
+                            View::Tree => !self.list_mode,
+                            View::Network => self.list_mode,
+                            _ => false,
+                        };
+                        if use_tree_layout {
+                            tree::view(snap, h, self.context_target.as_deref())
+                        } else {
+                            network::view(snap, h)
+                        }
+                    }
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };
-                let mut tree_col = column![tree_body]
+                let mut content_col = column![content_body]
                     .width(Length::Fill)
                     .height(Length::Fill);
 
                 if let Some(add) = &self.pending_add {
-                    tree_col = tree_col.push(self.add_person_modal(add));
+                    content_col = content_col.push(self.add_person_modal(add));
                 }
 
                 let mut main_row = row![].width(Length::Fill).height(Length::Fill);
@@ -1508,20 +1514,7 @@ impl App {
                     main_row = main_row.push(self.nav_column());
                     main_row = main_row.push(vertical_separator());
                 }
-                main_row = main_row.push(tree_col);
-                main_row.into()
-            }
-            Some(snap) if self.current == View::Network => {
-                let net_body = match &self.home_person {
-                    Some(h) => network::view(snap, h),
-                    None => detail_ui::empty("No person loaded."),
-                };
-                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
-                if self.sidebar_visible {
-                    main_row = main_row.push(self.nav_column());
-                    main_row = main_row.push(vertical_separator());
-                }
-                main_row = main_row.push(net_body);
+                main_row = main_row.push(content_col);
                 main_row.into()
             }
             Some(snap) => {

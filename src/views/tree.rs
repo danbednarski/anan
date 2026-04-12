@@ -14,7 +14,7 @@
 //! Edit / Delete for the current home person. Right-click context
 //! menus are deferred to a polish iteration.
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
@@ -283,8 +283,9 @@ fn collect_generation_nodes(
     }
 }
 
-/// A clickable person card — click re-homes the tree. Takes owned
-/// data so the returned Element has a `'static` borrow on its content.
+/// A clickable person card.
+/// - Left-click → re-home the tree on this person.
+/// - Right-click → open context menu for this person.
 fn person_card(node: TreeNode, is_home: bool) -> Element<'static, Message> {
     let name_size = if is_home { 20 } else { 14 };
     let years_size = if is_home { 14 } else { 11 };
@@ -304,9 +305,14 @@ fn person_card(node: TreeNode, is_home: bool) -> Element<'static, Message> {
             .color(iced::Color::from_rgb(0.6, 0.6, 0.6)),
     );
 
-    button(container(col).padding(padding).width(Length::Shrink))
-        .on_press(Message::TreeHome(node.handle))
-        .style(move |theme: &Theme, status| card_style(theme, status, is_home))
+    let handle = node.handle.clone();
+    let right_handle = node.handle;
+    let card = button(container(col).padding(padding).width(Length::Shrink))
+        .on_press(Message::TreeHome(handle))
+        .style(move |theme: &Theme, status| card_style(theme, status, is_home));
+
+    mouse_area(card)
+        .on_right_press(Message::TreeContextMenu(right_handle))
         .into()
 }
 
@@ -319,9 +325,14 @@ fn person_card_small(node: TreeNode) -> Element<'static, Message> {
     ]
     .spacing(2);
 
-    button(container(col).padding([6, 10]))
-        .on_press(Message::TreeHome(node.handle))
-        .style(|theme: &Theme, status| card_style(theme, status, false))
+    let handle = node.handle.clone();
+    let right_handle = node.handle;
+    let card = button(container(col).padding([6, 10]))
+        .on_press(Message::TreeHome(handle))
+        .style(|theme: &Theme, status| card_style(theme, status, false));
+
+    mouse_area(card)
+        .on_right_press(Message::TreeContextMenu(right_handle))
         .into()
 }
 

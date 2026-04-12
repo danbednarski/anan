@@ -60,8 +60,17 @@ pub enum View {
 }
 
 impl View {
+    /// Primary nav items shown in the sidebar. The list views still
+    /// exist and work but are tucked under Browse so the tree is the
+    /// hero experience.
     const NAV_ITEMS: &'static [View] = &[
         View::Tree,
+        View::Search,
+    ];
+
+    /// Secondary items accessible via the "Browse" section in the
+    /// sidebar.
+    const BROWSE_ITEMS: &'static [View] = &[
         View::Persons,
         View::Families,
         View::Events,
@@ -72,7 +81,6 @@ impl View {
         View::Notes,
         View::Repositories,
         View::Tags,
-        View::Search,
     ];
 
     fn label(self) -> &'static str {
@@ -126,10 +134,62 @@ pub struct App {
     /// Pending deletion awaiting confirmation (second click commits).
     delete_confirm: Option<PendingDelete>,
 
+    /// Right-click context menu target — the person handle the user
+    /// right-clicked in the tree. While Some, the context bar renders
+    /// action buttons for that person.
+    context_target: Option<String>,
+
+    /// Modal form for adding a new person with a relationship. While
+    /// Some, an overlay appears on top of the tree with name/gender/
+    /// date fields. Submitting creates the person and wires the
+    /// relationship.
+    pending_add: Option<PendingAdd>,
+
     error: Option<String>,
     loading: bool,
     /// True while a write transaction is in flight.
     saving: bool,
+}
+
+/// What kind of relationship the "add person" modal will create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddRelationship {
+    Child,
+    Father,
+    Mother,
+    Sibling,
+}
+
+impl AddRelationship {
+    fn label(self) -> &'static str {
+        match self {
+            AddRelationship::Child => "Add child",
+            AddRelationship::Father => "Add father",
+            AddRelationship::Mother => "Add mother",
+            AddRelationship::Sibling => "Add sibling",
+        }
+    }
+
+    fn default_gender(self) -> i32 {
+        match self {
+            AddRelationship::Father => 1,
+            AddRelationship::Mother => 0,
+            _ => 2, // unknown
+        }
+    }
+}
+
+/// State for the "add person" modal.
+#[derive(Debug, Clone)]
+pub struct PendingAdd {
+    pub relationship: AddRelationship,
+    /// The person in the tree the new person is relative to.
+    pub target_handle: String,
+    pub first_name: String,
+    pub surname: String,
+    pub gender_s: String,
+    pub birth_year_s: String,
+    pub death_year_s: String,
 }
 
 /// One open edit — either a brand-new object that hasn't been saved
@@ -296,16 +356,26 @@ pub enum Message {
     /// "Open in its own view" from a Search result row.
     OpenSearchHit(SearchHit),
 
-    // ---- tree view (Phase 7) -------------------------------------------
+    // ---- tree view -------------------------------------------------------
     /// Click a person card in the tree → re-home on that person.
     TreeHome(String),
-    /// Add a child to the current home person.
-    TreeAddChild,
-    /// Add a parent (father if male, mother if female) to the home person.
-    TreeAddFather,
-    TreeAddMother,
-    /// Add a sibling to the home person.
-    TreeAddSibling,
+    /// Right-click a person card → open context menu for that person.
+    TreeContextMenu(String),
+    /// Dismiss the context menu.
+    TreeDismissContext,
+    /// User picked an action from the context menu → open the add-person
+    /// modal with the appropriate relationship pre-selected.
+    TreeStartAdd(AddRelationship),
+    /// Submit the add-person modal.
+    TreeSubmitAdd,
+    /// Cancel the add-person modal.
+    TreeCancelAdd,
+    /// Field edits inside the add-person modal.
+    AddFirstName(String),
+    AddSurname(String),
+    AddGender(String),
+    AddBirthYear(String),
+    AddDeathYear(String),
 
     // ---- write / edit flow (Phase 4) -----------------------------------
     /// Start creating a new object in the given view (Tag, Note, Repository).
@@ -462,6 +532,8 @@ impl App {
                 home_person: None,
                 edit: None,
                 delete_confirm: None,
+                context_target: None,
+                pending_add: None,
                 error: None,
                 loading,
                 saving: false,
@@ -569,67 +641,97 @@ impl App {
 
             // ---- tree actions -------------------------------------------
             Message::TreeHome(handle) => {
+                self.context_target = None;
                 self.home_person = Some(handle);
                 Task::none()
             }
-            Message::TreeAddChild => {
-                let (Some(db), Some(home)) =
-                    (self.db.clone(), self.home_person.clone())
+            Message::TreeContextMenu(handle) => {
+                self.context_target = Some(handle);
+                Task::none()
+            }
+            Message::TreeDismissContext => {
+                self.context_target = None;
+                Task::none()
+            }
+            Message::TreeStartAdd(rel) => {
+                let target = self
+                    .context_target
+                    .clone()
+                    .or_else(|| self.home_person.clone());
+                let Some(target_handle) = target else {
+                    return Task::none();
+                };
+                // Pre-fill surname from the target person.
+                let surname = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.person(&target_handle))
+                    .map(|p| {
+                        p.primary_name
+                            .surname_list
+                            .iter()
+                            .find(|s| s.primary)
+                            .or_else(|| p.primary_name.surname_list.first())
+                            .map(|s| s.surname.clone())
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                self.context_target = None;
+                self.pending_add = Some(PendingAdd {
+                    relationship: rel,
+                    target_handle,
+                    first_name: String::new(),
+                    surname,
+                    gender_s: rel.default_gender().to_string(),
+                    birth_year_s: String::new(),
+                    death_year_s: String::new(),
+                });
+                Task::none()
+            }
+            Message::TreeCancelAdd => {
+                self.pending_add = None;
+                Task::none()
+            }
+            Message::TreeSubmitAdd => {
+                let (Some(db), Some(add)) = (self.db.clone(), self.pending_add.take())
                 else {
                     return Task::none();
                 };
-                let surname = self.home_surname().unwrap_or_default();
                 self.saving = true;
                 Task::perform(
-                    tree_action_async(db, move |txn| {
-                        dbrepo::relationships::add_child(txn, &home, "New", &surname, 2)
-                    }),
+                    tree_add_async(db, add),
                     |r| Message::WriteCompleted(Box::new(r)),
                 )
             }
-            Message::TreeAddFather => {
-                let (Some(db), Some(home)) =
-                    (self.db.clone(), self.home_person.clone())
-                else {
-                    return Task::none();
-                };
-                let surname = self.home_surname().unwrap_or_default();
-                self.saving = true;
-                Task::perform(
-                    tree_action_async(db, move |txn| {
-                        dbrepo::relationships::add_parent(txn, &home, "New", &surname, 1)
-                    }),
-                    |r| Message::WriteCompleted(Box::new(r)),
-                )
+            Message::AddFirstName(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.first_name = v;
+                }
+                Task::none()
             }
-            Message::TreeAddMother => {
-                let (Some(db), Some(home)) =
-                    (self.db.clone(), self.home_person.clone())
-                else {
-                    return Task::none();
-                };
-                self.saving = true;
-                Task::perform(
-                    tree_action_async(db, move |txn| {
-                        dbrepo::relationships::add_parent(txn, &home, "New", "", 0)
-                    }),
-                    |r| Message::WriteCompleted(Box::new(r)),
-                )
+            Message::AddSurname(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.surname = v;
+                }
+                Task::none()
             }
-            Message::TreeAddSibling => {
-                let (Some(db), Some(home)) =
-                    (self.db.clone(), self.home_person.clone())
-                else {
-                    return Task::none();
-                };
-                let surname = self.home_surname().unwrap_or_default();
-                self.saving = true;
-                Task::perform(
-                    tree_action_async(db, move |txn| {
-                        dbrepo::relationships::add_sibling(txn, &home, "New", &surname, 2)
-                    }),
-                    |r| Message::WriteCompleted(Box::new(r)),
-                )
+            Message::AddGender(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.gender_s = v;
+                }
+                Task::none()
+            }
+            Message::AddBirthYear(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.birth_year_s = v;
+                }
+                Task::none()
+            }
+            Message::AddDeathYear(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.death_year_s = v;
+                }
+                Task::none()
             }
 
             // ---- edit flow -----------------------------------------------
@@ -1282,10 +1384,16 @@ impl App {
                     Some(h) => tree::view(snap, h),
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };
-                let tree_actions = self.tree_action_bar();
-                let tree_col = column![tree_actions, tree_body]
+                let context_bar = self.tree_context_bar(snap);
+                let mut tree_col = column![context_bar, tree_body]
                     .width(Length::Fill)
                     .height(Length::Fill);
+
+                // Modal overlay for add-person form.
+                if let Some(add) = &self.pending_add {
+                    tree_col = tree_col.push(self.add_person_modal(add));
+                }
+
                 row![nav, vertical_separator(), tree_col]
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -1349,23 +1457,39 @@ impl App {
     // --- view helpers ----------------------------------------------------
 
     fn nav_column(&self) -> Element<'_, Message> {
-        let mut col = column![text("Views").size(12).color(iced::Color::from_rgb(
-            0.5, 0.5, 0.5
-        ))]
-        .spacing(4)
-        .padding(12);
+        let mut col = column![].spacing(4).padding(12);
+
+        // Primary nav: Tree + Search.
         for item in View::NAV_ITEMS {
-            let count = self.count_for(*item);
-            let label = format!("{}  ({count})", item.label());
+            let label = item.label().to_string();
             let is_current = *item == self.current;
-            let btn = button(text(label).size(13))
+            let btn = button(text(label).size(14))
                 .width(Length::Fill)
                 .on_press(Message::ShowView(*item))
                 .style(move |theme: &Theme, status| nav_style(theme, status, is_current));
             col = col.push(btn);
         }
+
+        // Browse section: list views for power users.
+        col = col.push(text("").size(8)); // spacer
+        col = col.push(
+            text("Browse")
+                .size(11)
+                .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        );
+        for item in View::BROWSE_ITEMS {
+            let count = self.count_for(*item);
+            let label = format!("{}  ({count})", item.label());
+            let is_current = *item == self.current;
+            let btn = button(text(label).size(11))
+                .width(Length::Fill)
+                .on_press(Message::ShowView(*item))
+                .style(move |theme: &Theme, status| nav_style(theme, status, is_current));
+            col = col.push(btn);
+        }
+
         container(scrollable(col))
-            .width(Length::Fixed(160.0))
+            .width(Length::Fixed(150.0))
             .height(Length::Fill)
             .into()
     }
@@ -1764,31 +1888,50 @@ impl App {
         search::recompute(snap, &mut self.search);
     }
 
-    /// Action bar for the tree view - shows + Child / + Father /
-    /// + Mother / + Sibling buttons plus the home person's name.
-    fn tree_action_bar<'a>(&'a self) -> Element<'a, Message> {
+    /// Context bar for the tree view. Shows either:
+    /// - the home person name (default state)
+    /// - context actions for a right-clicked person
+    /// - "saving..." while a write is in flight
+    fn tree_context_bar<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
         let mut bar = row![].spacing(8).padding(8).align_y(Alignment::Center);
 
-        let home_name = self
-            .home_person
-            .as_deref()
-            .and_then(|h| {
-                self.snapshot
-                    .as_ref()
-                    .and_then(|s| s.person(h))
-                    .map(|p| p.primary_name.display())
-            })
-            .unwrap_or_else(|| "(no home)".to_string());
-
-        bar = bar.push(text(format!("Home: {home_name}")).size(14));
-
         if self.saving {
-            bar = bar.push(text("saving...").size(12));
+            bar = bar.push(text("saving...").size(14));
+        } else if let Some(target) = &self.context_target {
+            let name = snap
+                .person(target)
+                .map(|p| p.primary_name.display())
+                .unwrap_or_else(|| "?".to_string());
+            bar = bar.push(text(format!("{name}:")).size(14));
+            bar = bar.push(
+                button(text("Add child")).on_press(Message::TreeStartAdd(AddRelationship::Child)),
+            );
+            bar = bar.push(
+                button(text("Add father"))
+                    .on_press(Message::TreeStartAdd(AddRelationship::Father)),
+            );
+            bar = bar.push(
+                button(text("Add mother"))
+                    .on_press(Message::TreeStartAdd(AddRelationship::Mother)),
+            );
+            bar = bar.push(
+                button(text("Add sibling"))
+                    .on_press(Message::TreeStartAdd(AddRelationship::Sibling)),
+            );
+            bar = bar.push(button(text("x")).on_press(Message::TreeDismissContext));
         } else {
-            bar = bar.push(button(text("+ Child")).on_press(Message::TreeAddChild));
-            bar = bar.push(button(text("+ Father")).on_press(Message::TreeAddFather));
-            bar = bar.push(button(text("+ Mother")).on_press(Message::TreeAddMother));
-            bar = bar.push(button(text("+ Sibling")).on_press(Message::TreeAddSibling));
+            let home_name = self
+                .home_person
+                .as_deref()
+                .and_then(|h| snap.person(h))
+                .map(|p| p.primary_name.display())
+                .unwrap_or_else(|| "(no home)".to_string());
+            bar = bar.push(text(format!("Home: {home_name}")).size(14));
+            bar = bar.push(
+                text("Right-click a person to add relatives")
+                    .size(11)
+                    .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            );
         }
 
         container(bar)
@@ -1800,6 +1943,113 @@ impl App {
                     ..Default::default()
                 }
             })
+            .into()
+    }
+
+    /// Modal overlay for the add-person form. Renders on top of the
+    /// tree area as a centered card with fields and Save/Cancel.
+    fn add_person_modal<'a>(&'a self, add: &'a PendingAdd) -> Element<'a, Message> {
+        let target_name = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.person(&add.target_handle))
+            .map(|p| p.primary_name.display())
+            .unwrap_or_else(|| "?".to_string());
+
+        let title = text(format!(
+            "{} of {}",
+            add.relationship.label(),
+            target_name
+        ))
+        .size(20);
+
+        let label_color = iced::Color::from_rgb(0.5, 0.5, 0.5);
+        let label = |s: &'static str| text(s).size(11).color(label_color);
+
+        let first_name_field = column![
+            label("First name"),
+            text_input("First name", &add.first_name)
+                .on_input(Message::AddFirstName)
+                .padding(6),
+        ]
+        .spacing(4);
+
+        let surname_field = column![
+            label("Surname"),
+            text_input("Surname", &add.surname)
+                .on_input(Message::AddSurname)
+                .padding(6),
+        ]
+        .spacing(4);
+
+        let gender_field = column![
+            label("Gender (0=female, 1=male, 2=unknown)"),
+            text_input("2", &add.gender_s)
+                .on_input(Message::AddGender)
+                .padding(6)
+                .width(Length::Fixed(60.0)),
+        ]
+        .spacing(4);
+
+        let birth_field = column![
+            label("Birth year (blank for unknown)"),
+            text_input("e.g. 1890", &add.birth_year_s)
+                .on_input(Message::AddBirthYear)
+                .padding(6)
+                .width(Length::Fixed(120.0)),
+        ]
+        .spacing(4);
+
+        let death_field = column![
+            label("Death year (blank for unknown)"),
+            text_input("e.g. 1965", &add.death_year_s)
+                .on_input(Message::AddDeathYear)
+                .padding(6)
+                .width(Length::Fixed(120.0)),
+        ]
+        .spacing(4);
+
+        let buttons = row![
+            button(text("Save")).on_press(Message::TreeSubmitAdd),
+            button(text("Cancel")).on_press(Message::TreeCancelAdd),
+        ]
+        .spacing(12);
+
+        let card = container(
+            column![
+                title,
+                first_name_field,
+                surname_field,
+                gender_field,
+                row![birth_field, death_field].spacing(16),
+                buttons,
+            ]
+            .spacing(12)
+            .padding(24)
+            .max_width(420),
+        )
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(iced::Background::Color(palette.background.base.color)),
+                border: iced::Border {
+                    color: palette.background.strong.color,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                shadow: iced::Shadow {
+                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    offset: iced::Vector::new(0.0, 4.0),
+                    blur_radius: 12.0,
+                },
+                ..Default::default()
+            }
+        });
+
+        container(card)
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .padding([40, 0])
             .into()
     }
 
@@ -1845,21 +2095,6 @@ impl App {
         }
     }
 
-    /// Primary surname of the current home person, for pre-filling
-    /// new child/sibling names.
-    fn home_surname(&self) -> Option<String> {
-        let snap = self.snapshot.as_ref()?;
-        let p = snap.person(self.home_person.as_deref()?)?;
-        Some(
-            p.primary_name
-                .surname_list
-                .iter()
-                .find(|s| s.primary)
-                .or_else(|| p.primary_name.surname_list.first())
-                .map(|s| s.surname.clone())
-                .unwrap_or_default(),
-        )
-    }
 }
 
 /// First 8 chars of a handle — enough to disambiguate in tracing and
@@ -2297,17 +2532,50 @@ async fn delete_async(
     }
 }
 
-/// Run a relationship-add action (add child/parent/sibling) inside a
-/// write txn, then reload the snapshot.
-async fn tree_action_async<F>(db: Arc<Database>, action: F) -> Result<Snapshot, String>
-where
-    F: FnOnce(&rusqlite::Transaction) -> anyhow::Result<crate::gramps::Person>
-        + Send
-        + 'static,
-{
+/// Run the add-person-with-relationship action from the modal form.
+async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, String> {
     let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
+        let gender: i32 = add.gender_s.parse().unwrap_or(2);
+        let birth = add.birth_year_s.trim().parse::<i32>().ok().filter(|y| *y != 0);
+        let death = add.death_year_s.trim().parse::<i32>().ok().filter(|y| *y != 0);
+
         db.write_txn(|txn| {
-            action(txn)?;
+            // First create the person with optional birth/death events.
+            let person = dbrepo::person::create(
+                txn,
+                &add.first_name,
+                &add.surname,
+                gender,
+                birth,
+                death,
+            )?;
+
+            // Then wire the relationship using the lower-level helpers
+            // that don't re-create the person.
+            match add.relationship {
+                AddRelationship::Child => {
+                    dbrepo::relationships::add_child_existing(
+                        txn,
+                        &add.target_handle,
+                        &person.handle,
+                    )?;
+                }
+                AddRelationship::Father | AddRelationship::Mother => {
+                    dbrepo::relationships::add_parent_existing(
+                        txn,
+                        &add.target_handle,
+                        &person.handle,
+                        gender,
+                    )?;
+                }
+                AddRelationship::Sibling => {
+                    dbrepo::relationships::add_sibling_existing(
+                        txn,
+                        &add.target_handle,
+                        &person.handle,
+                    )?;
+                }
+            }
             Ok(())
         })?;
         db.snapshot()

@@ -300,3 +300,170 @@ fn append_child_to_family(txn: &Transaction, family_handle: &str, child_handle: 
     family_repo::save(txn, &mut family)?;
     Ok(())
 }
+
+// ---- "_existing" variants: wire an already-created person ----
+//
+// Used by the modal flow where the person is created with full
+// name/dates first, then wired into the relationship separately.
+
+/// Wire an existing child person into a parent's family. Same logic
+/// as `add_child` but skips the person creation step.
+pub fn add_child_existing(
+    txn: &Transaction,
+    parent_handle: &str,
+    child_handle: &str,
+) -> Result<()> {
+    let parent_json: String = txn
+        .query_row(
+            "SELECT json_data FROM person WHERE handle = ?1",
+            params![parent_handle],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("load parent {parent_handle}"))?;
+    let parent: Person =
+        serde_json::from_str(&parent_json).context("parse parent")?;
+
+    let family_handle = if let Some(fh) = parent.family_list.first().cloned() {
+        fh
+    } else {
+        let (father, mother) = if parent.gender == 0 {
+            (None, Some(parent_handle.to_string()))
+        } else {
+            (Some(parent_handle.to_string()), None)
+        };
+        let fam = family_repo::create(txn, father, mother, 0)?;
+        fam.handle
+    };
+
+    append_child_to_family(txn, &family_handle, child_handle)?;
+
+    let mut child: Person = {
+        let j: String = txn
+            .query_row(
+                "SELECT json_data FROM person WHERE handle = ?1",
+                params![child_handle],
+                |r| r.get(0),
+            )
+            .context("reload child")?;
+        serde_json::from_str(&j).context("parse child")?
+    };
+    if !child.parent_family_list.iter().any(|h| h == &family_handle) {
+        child.parent_family_list.push(family_handle);
+        person_repo::save_row(txn, &mut child)?;
+    }
+    Ok(())
+}
+
+/// Wire an existing person as parent of `person_handle`.
+pub fn add_parent_existing(
+    txn: &Transaction,
+    person_handle: &str,
+    new_parent_handle: &str,
+    gender: i32,
+) -> Result<()> {
+    let person_json: String = txn
+        .query_row(
+            "SELECT json_data FROM person WHERE handle = ?1",
+            params![person_handle],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("load person {person_handle}"))?;
+    let mut person: Person =
+        serde_json::from_str(&person_json).context("parse person")?;
+
+    // Check existing parent family for open slot.
+    let existing_family = person.parent_family_list.first().and_then(|fh| {
+        let j: String = txn
+            .query_row(
+                "SELECT json_data FROM family WHERE handle = ?1",
+                params![fh],
+                |r| r.get(0),
+            )
+            .ok()?;
+        let fam: Family = serde_json::from_str(&j).ok()?;
+        let slot_open = if gender == 0 {
+            fam.mother_handle.is_none()
+        } else {
+            fam.father_handle.is_none()
+        };
+        if slot_open { Some(fam) } else { None }
+    });
+
+    if let Some(mut fam) = existing_family {
+        if gender == 0 {
+            fam.mother_handle = Some(new_parent_handle.to_string());
+        } else {
+            fam.father_handle = Some(new_parent_handle.to_string());
+        }
+        family_repo::save(txn, &mut fam)?;
+
+        let mut np: Person = {
+            let j: String = txn
+                .query_row(
+                    "SELECT json_data FROM person WHERE handle = ?1",
+                    params![new_parent_handle],
+                    |r| r.get(0),
+                )
+                .context("reload new parent")?;
+            serde_json::from_str(&j).context("parse new parent")?
+        };
+        if !np.family_list.iter().any(|h| h == &fam.handle) {
+            np.family_list.push(fam.handle);
+            person_repo::save_row(txn, &mut np)?;
+        }
+    } else {
+        let (father, mother) = if gender == 0 {
+            (None, Some(new_parent_handle.to_string()))
+        } else {
+            (Some(new_parent_handle.to_string()), None)
+        };
+        let fam = family_repo::create(txn, father, mother, 0)?;
+        append_child_to_family(txn, &fam.handle, person_handle)?;
+        if !person.parent_family_list.iter().any(|h| h == &fam.handle) {
+            person.parent_family_list.push(fam.handle);
+            person_repo::save_row(txn, &mut person)?;
+        }
+    }
+    Ok(())
+}
+
+/// Wire an existing person as a sibling of `person_handle`.
+pub fn add_sibling_existing(
+    txn: &Transaction,
+    person_handle: &str,
+    sibling_handle: &str,
+) -> Result<()> {
+    let person_json: String = txn
+        .query_row(
+            "SELECT json_data FROM person WHERE handle = ?1",
+            params![person_handle],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("load person {person_handle}"))?;
+    let person: Person =
+        serde_json::from_str(&person_json).context("parse person")?;
+
+    let family_handle = person
+        .parent_family_list
+        .first()
+        .ok_or_else(|| anyhow!("no parent family to add a sibling to - add parents first"))?
+        .clone();
+
+    append_child_to_family(txn, &family_handle, sibling_handle)?;
+
+    let mut sib: Person = {
+        let j: String = txn
+            .query_row(
+                "SELECT json_data FROM person WHERE handle = ?1",
+                params![sibling_handle],
+                |r| r.get(0),
+            )
+            .context("reload sibling")?;
+        serde_json::from_str(&j).context("parse sibling")?
+    };
+    if !sib.parent_family_list.iter().any(|h| h == &family_handle) {
+        sib.parent_family_list.push(family_handle);
+        person_repo::save_row(txn, &mut sib)?;
+    }
+    Ok(())
+}

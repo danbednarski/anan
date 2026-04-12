@@ -23,13 +23,14 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
 
-use crate::db::{self, Snapshot};
+use crate::db::{repo as dbrepo, Database, Snapshot};
 use crate::views::list_pane::ListState;
 use crate::views::search::{SearchHit, SearchState};
 use crate::views::{
@@ -91,6 +92,12 @@ impl View {
 
 #[derive(Debug)]
 pub struct App {
+    /// Persistent read-write handle to the open tree. `None` until a DB
+    /// is opened. Wrapped in [`Arc`] so it can be cloned into
+    /// `tokio::spawn_blocking` closures for write operations.
+    db: Option<Arc<Database>>,
+    /// Most recent in-memory view of the tree. Refreshed after every
+    /// successful write.
     snapshot: Option<Snapshot>,
     current: View,
 
@@ -106,8 +113,50 @@ pub struct App {
     tags: ListState,
     search: SearchState,
 
+    /// Active in-place edit session, or `None` when not editing.
+    edit: Option<EditSession>,
+    /// Handle awaiting delete confirmation; second click commits.
+    delete_confirm: Option<String>,
+
     error: Option<String>,
     loading: bool,
+    /// True while a write transaction is in flight.
+    saving: bool,
+}
+
+/// One open edit — either a brand-new object that hasn't been saved
+/// yet, or an in-place edit of an existing row.
+#[derive(Debug, Clone)]
+pub struct EditSession {
+    /// `Some(handle)` when editing in place; `None` when creating.
+    pub handle: Option<String>,
+    pub draft: EditDraft,
+}
+
+#[derive(Debug, Clone)]
+pub enum EditDraft {
+    Tag(TagDraft),
+    Note(NoteDraft),
+    Repository(RepoDraft),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TagDraft {
+    pub name: String,
+    pub color: String,
+    pub priority_s: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoteDraft {
+    pub body: String,
+    pub type_value_s: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RepoDraft {
+    pub name: String,
+    pub type_value_s: String,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +167,7 @@ pub enum Message {
     FilePicked(Option<PathBuf>),
     /// Blocking loader result. Boxed because `Snapshot` is large and we
     /// want small enum variants for the common messages.
-    DbOpened(Box<Result<Snapshot, String>>),
+    DbOpened(Box<Result<OpenedDb, String>>),
     /// Sidebar navigation click.
     ShowView(View),
     /// Search box input — applies to the current view.
@@ -135,6 +184,53 @@ pub enum Message {
     Dismiss,
     /// "Open in its own view" from a Search result row.
     OpenSearchHit(SearchHit),
+
+    // ---- write / edit flow (Phase 4) -----------------------------------
+    /// Start creating a new object in the given view (Tag, Note, Repository).
+    StartCreate(View),
+    /// Start editing the selected object in the given view.
+    StartEditSelected,
+    /// Drop the current edit session without saving.
+    CancelEdit,
+    /// Commit the current edit session to the database.
+    SaveEdit,
+    /// Result of a write txn + reload. `Ok(snapshot)` on success.
+    WriteCompleted(Box<Result<Snapshot, String>>),
+    /// First click on Delete — arm the inline confirm banner.
+    StartDelete(String),
+    /// Second click on Delete — actually delete.
+    ConfirmDelete,
+    /// Back out of a pending delete.
+    CancelDelete,
+
+    // ---- draft field edits --------------------------------------------
+    EditTagName(String),
+    EditTagColor(String),
+    EditTagPriority(String),
+    EditNoteBody(String),
+    EditNoteType(String),
+    EditRepoName(String),
+    EditRepoType(String),
+}
+
+/// Package returned by the async open-db task: both the persistent
+/// [`Database`] handle and the initial [`Snapshot`] read through it.
+#[derive(Debug)]
+pub struct OpenedDb {
+    pub db: Arc<Database>,
+    pub snapshot: Snapshot,
+}
+
+// `Clone` is required on all `Message` variants because iced's runtime
+// may clone pending messages. `Arc<Database>` is cheap to clone;
+// `Snapshot` is already `Clone`.
+impl Clone for OpenedDb {
+    fn clone(&self) -> Self {
+        OpenedDb {
+            db: Arc::clone(&self.db),
+            snapshot: self.snapshot.clone(),
+        }
+    }
 }
 
 impl App {
@@ -142,16 +238,39 @@ impl App {
     /// to the crate manifest, auto-load it so developers get an instant
     /// populated view. Otherwise start empty.
     pub fn new() -> (Self, Task<Message>) {
+        // Auto-load a scratch copy of the test fixture so the committed
+        // file in `test-fixtures/` never gets mutated by edits the user
+        // makes through the UI. A real tree opened via File > Open DB…
+        // is modified in place.
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/sample.db");
         let (loading, initial) = if fixture.exists() {
-            (true, Task::perform(load_async(fixture), Message::DbOpened))
+            let scratch = std::env::temp_dir().join("gramps-desktop-scratch.db");
+            // Always refresh the scratch copy on launch so developers get
+            // a clean fixture each run. If the copy fails (e.g. /tmp is
+            // non-writable) we fall through to opening the original,
+            // which is a safer failure mode than silently hiding an
+            // error — the user will see the bubble-up.
+            match std::fs::copy(&fixture, &scratch) {
+                Ok(_) => (
+                    true,
+                    Task::perform(load_async(scratch), Message::DbOpened),
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "could not copy fixture to scratch; opening original read-write"
+                    );
+                    (true, Task::perform(load_async(fixture), Message::DbOpened))
+                }
+            }
         } else {
             (false, Task::none())
         };
 
         (
             App {
+                db: None,
                 snapshot: None,
                 current: View::Persons,
                 persons: ListState::default(),
@@ -165,8 +284,11 @@ impl App {
                 repositories: ListState::default(),
                 tags: ListState::default(),
                 search: SearchState::default(),
+                edit: None,
+                delete_confirm: None,
                 error: None,
                 loading,
+                saving: false,
             },
             initial,
         )
@@ -203,22 +325,25 @@ impl App {
             Message::DbOpened(result) => {
                 self.loading = false;
                 match *result {
-                    Ok(snap) => {
+                    Ok(OpenedDb { db, snapshot }) => {
                         tracing::info!(
-                            path = %snap.path.display(),
-                            persons = snap.persons.len(),
-                            families = snap.families.len(),
-                            events = snap.events.len(),
-                            places = snap.places.len(),
-                            sources = snap.sources.len(),
-                            citations = snap.citations.len(),
-                            media = snap.media.len(),
-                            notes = snap.notes.len(),
-                            repositories = snap.repositories.len(),
-                            tags = snap.tags.len(),
+                            path = %snapshot.path.display(),
+                            persons = snapshot.persons.len(),
+                            families = snapshot.families.len(),
+                            events = snapshot.events.len(),
+                            places = snapshot.places.len(),
+                            sources = snapshot.sources.len(),
+                            citations = snapshot.citations.len(),
+                            media = snapshot.media.len(),
+                            notes = snapshot.notes.len(),
+                            repositories = snapshot.repositories.len(),
+                            tags = snapshot.tags.len(),
                             "loaded snapshot"
                         );
-                        self.snapshot = Some(snap);
+                        self.db = Some(db);
+                        self.snapshot = Some(snapshot);
+                        self.edit = None;
+                        self.delete_confirm = None;
                         self.recompute_all();
                     }
                     Err(err) => {
@@ -261,6 +386,160 @@ impl App {
                 self.jump_to_hit(hit);
                 Task::none()
             }
+
+            // ---- edit flow -----------------------------------------------
+            Message::StartCreate(view) => {
+                self.delete_confirm = None;
+                self.current = view;
+                self.edit = Some(EditSession {
+                    handle: None,
+                    draft: default_draft_for(view),
+                });
+                Task::none()
+            }
+            Message::StartEditSelected => {
+                self.delete_confirm = None;
+                self.edit = self.populate_edit_from_selection();
+                Task::none()
+            }
+            Message::CancelEdit => {
+                self.edit = None;
+                Task::none()
+            }
+            Message::SaveEdit => {
+                let (Some(db), Some(session)) = (self.db.clone(), self.edit.take()) else {
+                    return Task::none();
+                };
+                self.saving = true;
+                Task::perform(save_async(db, session), |r| {
+                    Message::WriteCompleted(Box::new(r))
+                })
+            }
+            Message::WriteCompleted(result) => {
+                self.saving = false;
+                match *result {
+                    Ok(snapshot) => {
+                        self.snapshot = Some(snapshot);
+                        self.recompute_all();
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "write failed");
+                        self.error = Some(err);
+                    }
+                }
+                Task::none()
+            }
+            Message::StartDelete(handle) => {
+                self.delete_confirm = Some(handle);
+                Task::none()
+            }
+            Message::CancelDelete => {
+                self.delete_confirm = None;
+                Task::none()
+            }
+            Message::ConfirmDelete => {
+                let (Some(db), Some(handle)) = (self.db.clone(), self.delete_confirm.take())
+                else {
+                    return Task::none();
+                };
+                let view = self.current;
+                self.saving = true;
+                Task::perform(delete_async(db, view, handle), |r| {
+                    Message::WriteCompleted(Box::new(r))
+                })
+            }
+
+            // ---- draft field edits ---------------------------------------
+            Message::EditTagName(v) => {
+                if let Some(EditDraft::Tag(d)) = self.draft_mut() {
+                    d.name = v;
+                }
+                Task::none()
+            }
+            Message::EditTagColor(v) => {
+                if let Some(EditDraft::Tag(d)) = self.draft_mut() {
+                    d.color = v;
+                }
+                Task::none()
+            }
+            Message::EditTagPriority(v) => {
+                if let Some(EditDraft::Tag(d)) = self.draft_mut() {
+                    d.priority_s = v;
+                }
+                Task::none()
+            }
+            Message::EditNoteBody(v) => {
+                if let Some(EditDraft::Note(d)) = self.draft_mut() {
+                    d.body = v;
+                }
+                Task::none()
+            }
+            Message::EditNoteType(v) => {
+                if let Some(EditDraft::Note(d)) = self.draft_mut() {
+                    d.type_value_s = v;
+                }
+                Task::none()
+            }
+            Message::EditRepoName(v) => {
+                if let Some(EditDraft::Repository(d)) = self.draft_mut() {
+                    d.name = v;
+                }
+                Task::none()
+            }
+            Message::EditRepoType(v) => {
+                if let Some(EditDraft::Repository(d)) = self.draft_mut() {
+                    d.type_value_s = v;
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn draft_mut(&mut self) -> Option<&mut EditDraft> {
+        self.edit.as_mut().map(|s| &mut s.draft)
+    }
+
+    /// Prefill an edit session from the currently-selected row of the
+    /// current view. Returns `None` if the current view isn't one of
+    /// the editable types or nothing is selected.
+    fn populate_edit_from_selection(&self) -> Option<EditSession> {
+        let snap = self.snapshot.as_ref()?;
+        match self.current {
+            View::Tags => {
+                let idx = self.tags.selected_item()?;
+                let tag = snap.tags.get(idx)?;
+                Some(EditSession {
+                    handle: Some(tag.handle.clone()),
+                    draft: EditDraft::Tag(TagDraft {
+                        name: tag.name.clone(),
+                        color: tag.color.clone(),
+                        priority_s: tag.priority.to_string(),
+                    }),
+                })
+            }
+            View::Notes => {
+                let idx = self.notes.selected_item()?;
+                let note = snap.notes.get(idx)?;
+                Some(EditSession {
+                    handle: Some(note.handle.clone()),
+                    draft: EditDraft::Note(NoteDraft {
+                        body: note.text.string.clone(),
+                        type_value_s: note.r#type.value.to_string(),
+                    }),
+                })
+            }
+            View::Repositories => {
+                let idx = self.repositories.selected_item()?;
+                let repo = snap.repositories.get(idx)?;
+                Some(EditSession {
+                    handle: Some(repo.handle.clone()),
+                    draft: EditDraft::Repository(RepoDraft {
+                        name: repo.name.clone(),
+                        type_value_s: repo.r#type.value.to_string(),
+                    }),
+                })
+            }
+            _ => None,
         }
     }
 
@@ -372,6 +651,29 @@ impl App {
     }
 
     fn detail_pane<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
+        let action_bar = self.action_bar();
+        let content = self.detail_content(snap);
+        column![action_bar, content]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn detail_content<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
+        // If an edit session is active for the current view, render the
+        // edit form instead of the read-only detail.
+        if let Some(session) = &self.edit {
+            let creating = session.handle.is_none();
+            match (&session.draft, self.current) {
+                (EditDraft::Tag(d), View::Tags) => return tag::edit_view(d, creating),
+                (EditDraft::Note(d), View::Notes) => return note::edit_view(d, creating),
+                (EditDraft::Repository(d), View::Repositories) => {
+                    return repository::edit_view(d, creating)
+                }
+                _ => {}
+            }
+        }
+
         let placeholder = || detail_ui::empty("Select a row to see details");
         match self.current {
             View::Persons => match self.persons.selected_item() {
@@ -463,6 +765,96 @@ impl App {
                 Some(hit) => search::detail_view(snap, hit),
                 None => placeholder(),
             },
+        }
+    }
+
+    /// Compose an action bar above the detail pane. Buttons are gated
+    /// on whether the current view is editable, whether something is
+    /// selected, and whether an edit session / delete confirmation is
+    /// active.
+    fn action_bar<'a>(&'a self) -> Element<'a, Message> {
+        let editable = matches!(
+            self.current,
+            View::Tags | View::Notes | View::Repositories
+        );
+        let has_selection = self.current_selected_handle().is_some();
+
+        let mut bar = row![].spacing(8).padding(8).align_y(Alignment::Center);
+
+        if !editable {
+            bar = bar.push(
+                text("(read-only in Phase 4)")
+                    .size(11)
+                    .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            );
+            return container(bar).width(Length::Fill).into();
+        }
+
+        if self.edit.is_some() {
+            // Save / Cancel while editing
+            let save_btn: iced::widget::Button<'_, Message> =
+                button(text("Save"));
+            let save_btn = if self.saving {
+                save_btn
+            } else {
+                save_btn.on_press(Message::SaveEdit)
+            };
+            bar = bar.push(save_btn);
+            bar = bar.push(button(text("Cancel")).on_press(Message::CancelEdit));
+            if self.saving {
+                bar = bar.push(text("saving…").size(12));
+            }
+        } else if let Some(handle) = self.delete_confirm.clone() {
+            bar = bar.push(
+                text(format!("Delete {}?", short(&handle)))
+                    .size(13)
+                    .color(iced::Color::from_rgb(0.7, 0.1, 0.1)),
+            );
+            bar = bar.push(button(text("Confirm delete")).on_press(Message::ConfirmDelete));
+            bar = bar.push(button(text("Keep")).on_press(Message::CancelDelete));
+        } else {
+            bar = bar.push(
+                button(text("+ New")).on_press(Message::StartCreate(self.current)),
+            );
+            if has_selection {
+                bar = bar.push(button(text("Edit")).on_press(Message::StartEditSelected));
+                if let Some(h) = self.current_selected_handle() {
+                    bar = bar.push(button(text("Delete")).on_press(Message::StartDelete(h)));
+                }
+            }
+        }
+
+        container(bar)
+            .width(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    background: Some(iced::Background::Color(palette.background.weak.color)),
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
+    /// Handle of the currently-selected object in the current view, if
+    /// the view is one of Tag / Note / Repository and something is
+    /// selected. Other views return `None`.
+    fn current_selected_handle(&self) -> Option<String> {
+        let snap = self.snapshot.as_ref()?;
+        match self.current {
+            View::Tags => {
+                let i = self.tags.selected_item()?;
+                Some(snap.tags.get(i)?.handle.clone())
+            }
+            View::Notes => {
+                let i = self.notes.selected_item()?;
+                Some(snap.notes.get(i)?.handle.clone())
+            }
+            View::Repositories => {
+                let i = self.repositories.selected_item()?;
+                Some(snap.repositories.get(i)?.handle.clone())
+            }
+            _ => None,
         }
     }
 
@@ -566,6 +958,12 @@ impl App {
     }
 }
 
+/// First 8 chars of a handle — enough to disambiguate in tracing and
+/// inline confirmation banners without eating the whole row.
+fn short(handle: &str) -> String {
+    handle.chars().take(8).collect()
+}
+
 fn global_key(key: Key, modifiers: Modifiers) -> Option<Message> {
     match key.as_ref() {
         Key::Named(Named::ArrowUp) => Some(Message::NavigateUp),
@@ -628,14 +1026,122 @@ async fn pick_file() -> Option<PathBuf> {
     Some(handle.path().to_path_buf())
 }
 
-/// Load a snapshot from disk on a blocking worker so the UI thread stays
-/// responsive. Errors are flattened to `String` for iced message-safety.
-async fn load_async(path: PathBuf) -> Box<Result<Snapshot, String>> {
-    Box::new(
-        match tokio::task::spawn_blocking(move || db::load_snapshot(&path)).await {
-            Ok(Ok(snap)) => Ok(snap),
-            Ok(Err(err)) => Err(format!("{err:#}")),
-            Err(join) => Err(format!("task panicked: {join}")),
-        },
-    )
+/// Open a [`Database`] and take an initial [`Snapshot`] through it,
+/// both on a blocking worker. Errors are flattened to `String` for
+/// iced message-safety.
+async fn load_async(path: PathBuf) -> Box<Result<OpenedDb, String>> {
+    let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<OpenedDb> {
+        let db = Arc::new(Database::open(&path)?);
+        let snapshot = db.snapshot()?;
+        Ok(OpenedDb { db, snapshot })
+    })
+    .await;
+    Box::new(match joined {
+        Ok(Ok(opened)) => Ok(opened),
+        Ok(Err(err)) => Err(format!("{err:#}")),
+        Err(join) => Err(format!("task panicked: {join}")),
+    })
+}
+
+/// Run a create-or-update write transaction for the given edit session,
+/// then reload the snapshot. Both steps happen on a blocking worker.
+async fn save_async(db: Arc<Database>, session: EditSession) -> Result<Snapshot, String> {
+    let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
+        db.write_txn(|txn| match session.draft {
+            EditDraft::Tag(draft) => {
+                let priority = draft.priority_s.parse().unwrap_or(0);
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::tag::update(txn, &h, &draft.name, &draft.color, priority)?;
+                    }
+                    None => {
+                        dbrepo::tag::create(txn, &draft.name, &draft.color, priority)?;
+                    }
+                }
+                Ok(())
+            }
+            EditDraft::Note(draft) => {
+                let type_value = draft.type_value_s.parse().unwrap_or(1);
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::note::update(txn, &h, type_value, &draft.body)?;
+                    }
+                    None => {
+                        dbrepo::note::create(txn, type_value, &draft.body)?;
+                    }
+                }
+                Ok(())
+            }
+            EditDraft::Repository(draft) => {
+                let type_value = draft.type_value_s.parse().unwrap_or(0);
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::repository::update(txn, &h, &draft.name, type_value)?;
+                    }
+                    None => {
+                        dbrepo::repository::create(txn, &draft.name, type_value)?;
+                    }
+                }
+                Ok(())
+            }
+        })?;
+        db.snapshot()
+    })
+    .await;
+    match joined {
+        Ok(Ok(snap)) => Ok(snap),
+        Ok(Err(err)) => Err(format!("{err:#}")),
+        Err(join) => Err(format!("task panicked: {join}")),
+    }
+}
+
+/// Run a delete transaction for the current view's selected object,
+/// then reload the snapshot.
+async fn delete_async(
+    db: Arc<Database>,
+    view: View,
+    handle: String,
+) -> Result<Snapshot, String> {
+    let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
+        db.write_txn(|txn| match view {
+            View::Tags => dbrepo::tag::delete(txn, &handle),
+            View::Notes => dbrepo::note::delete(txn, &handle),
+            View::Repositories => dbrepo::repository::delete(txn, &handle),
+            other => Err(anyhow::anyhow!(
+                "delete not supported for view {:?}",
+                other
+            )),
+        })?;
+        db.snapshot()
+    })
+    .await;
+    match joined {
+        Ok(Ok(snap)) => Ok(snap),
+        Ok(Err(err)) => Err(format!("{err:#}")),
+        Err(join) => Err(format!("task panicked: {join}")),
+    }
+}
+
+fn default_draft_for(view: View) -> EditDraft {
+    match view {
+        View::Tags => EditDraft::Tag(TagDraft {
+            name: "New tag".to_string(),
+            color: "#888888".to_string(),
+            priority_s: "0".to_string(),
+        }),
+        View::Notes => EditDraft::Note(NoteDraft {
+            body: String::new(),
+            // NoteType::General = 1
+            type_value_s: "1".to_string(),
+        }),
+        View::Repositories => EditDraft::Repository(RepoDraft {
+            name: "New repository".to_string(),
+            // RepositoryType::Library = 1
+            type_value_s: "1".to_string(),
+        }),
+        // Non-editable views fall back to an empty tag draft; the UI
+        // won't actually reach this branch because the "New" button is
+        // gated on an editable view.
+        _ => EditDraft::Tag(TagDraft::default()),
+    }
 }

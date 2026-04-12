@@ -1,18 +1,22 @@
-//! Read-only SQLite access to a Gramps family tree.
+//! SQLite access to a Gramps family tree — both read and write.
 //!
-//! `load_snapshot(path)` opens the DB read-only, deserializes every row
-//! of every primary-object table into the typed structs from
-//! `crate::gramps`, and returns an in-memory [`Snapshot`]. For a
-//! 48-person fixture this is instant; even a large family tree should fit
-//! comfortably in a few MB of memory.
+//! Two entry points:
+//!
+//! - [`load_snapshot`] opens the file *read-only*, parses every row into
+//!   Rust structs, and drops the connection. This is what the
+//!   `dump_db` example and any diagnostic tool should use. The returned
+//!   [`Snapshot`] is a plain owned value safe to pass around.
+//!
+//! - [`Database::open`] opens the file *read-write* and keeps the
+//!   connection alive for the duration of an editing session.
+//!   [`Database::snapshot`] re-reads the tree on demand, and
+//!   [`Database::write_txn`] runs a closure inside a SQLite transaction
+//!   with backup-before-write and change-timestamp handling.
 //!
 //! Every primary type is stored as a `Vec<T>` so the UI can iterate in
 //! load order, plus a `HashMap<String, usize>` in [`HandleIndex`] for
 //! O(1) handle lookup. Views should prefer the `Snapshot::foo()`
 //! accessors over touching the raw fields directly.
-//!
-//! When writes arrive (Phase 4+) we'll grow this module into a proper
-//! `Database` type with prepared statements and a transaction wrapper.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +26,11 @@ use rusqlite::{Connection, OpenFlags};
 use serde::de::DeserializeOwned;
 
 use crate::gramps::{Citation, Event, Family, Media, Note, Person, Place, Repository, Source, Tag};
+
+pub mod database;
+pub mod repo;
+
+pub use database::{Database, BACKUP_INTERVAL, BACKUP_KEEP};
 
 /// All primary objects loaded from a single tree, plus a lookup index.
 #[derive(Debug, Clone)]
@@ -94,17 +103,23 @@ impl Snapshot {
 pub fn load_snapshot(path: &Path) -> Result<Snapshot> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {}", path.display()))?;
+    load_from_conn(&conn, path.to_path_buf())
+}
 
-    let persons: Vec<Person> = load_all(&conn, "person")?;
-    let families: Vec<Family> = load_all(&conn, "family")?;
-    let events: Vec<Event> = load_all(&conn, "event")?;
-    let places: Vec<Place> = load_all(&conn, "place")?;
-    let sources: Vec<Source> = load_all(&conn, "source")?;
-    let citations: Vec<Citation> = load_all(&conn, "citation")?;
-    let media: Vec<Media> = load_all(&conn, "media")?;
-    let notes: Vec<Note> = load_all(&conn, "note")?;
-    let repositories: Vec<Repository> = load_all(&conn, "repository")?;
-    let tags: Vec<Tag> = load_all(&conn, "tag")?;
+/// Shared reader used by [`load_snapshot`] and [`Database::snapshot`].
+/// Caller is responsible for providing an open connection with
+/// sufficient privileges; this function just runs the SELECTs.
+pub(crate) fn load_from_conn(conn: &Connection, path: PathBuf) -> Result<Snapshot> {
+    let persons: Vec<Person> = load_all(conn, "person")?;
+    let families: Vec<Family> = load_all(conn, "family")?;
+    let events: Vec<Event> = load_all(conn, "event")?;
+    let places: Vec<Place> = load_all(conn, "place")?;
+    let sources: Vec<Source> = load_all(conn, "source")?;
+    let citations: Vec<Citation> = load_all(conn, "citation")?;
+    let media: Vec<Media> = load_all(conn, "media")?;
+    let notes: Vec<Note> = load_all(conn, "note")?;
+    let repositories: Vec<Repository> = load_all(conn, "repository")?;
+    let tags: Vec<Tag> = load_all(conn, "tag")?;
 
     let index = HandleIndex {
         persons: index_by_handle(&persons, |p| &p.handle),
@@ -120,7 +135,7 @@ pub fn load_snapshot(path: &Path) -> Result<Snapshot> {
     };
 
     Ok(Snapshot {
-        path: path.to_path_buf(),
+        path,
         persons,
         families,
         events,
@@ -143,7 +158,7 @@ fn index_by_handle<T>(items: &[T], key: impl Fn(&T) -> &String) -> HashMap<Strin
         .collect()
 }
 
-/// Generic loader used by [`load_snapshot`] and by `examples/dump_db.rs`.
+/// Generic loader used by [`load_from_conn`] and by `examples/dump_db.rs`.
 /// Deserializes every `json_data` row of `table` into `T`.
 pub fn load_all<T: DeserializeOwned>(conn: &Connection, table: &str) -> Result<Vec<T>> {
     let sql = format!("SELECT json_data FROM {table}");

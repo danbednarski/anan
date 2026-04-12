@@ -7,12 +7,12 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
-use crate::app::Message;
+use crate::app::{Message, TagDraft};
 use crate::db::Snapshot;
 use crate::gramps::Tag;
 
@@ -153,4 +153,43 @@ fn tagged_objects<'a>(tag: &'a Tag, snap: &'a Snapshot) -> Element<'a, Message> 
         return text("(none)").size(13).into();
     }
     col.into()
+}
+
+/// Edit-form view for a Tag. Shown in place of the detail pane while
+/// the app has an active Tag edit session.
+pub fn edit_view<'a>(draft: &'a TagDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New tag" } else { "Edit tag" }).size(24);
+
+    let name_field = column![
+        text("Name").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("Tag name", &draft.name)
+            .on_input(Message::EditTagName)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let color_field = column![
+        text("Color (hex)").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("#rrggbb", &draft.color)
+            .on_input(Message::EditTagColor)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let priority_field = column![
+        text("Priority").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("0", &draft.priority_s)
+            .on_input(Message::EditTagPriority)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body = column![title, name_field, color_field, priority_field]
+        .spacing(14)
+        .padding(24)
+        .align_x(Alignment::Start);
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

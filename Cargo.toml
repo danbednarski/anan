@@ -19,6 +19,9 @@ rfd = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+# UUID generation is hand-rolled in db::repo::common::new_handle — no
+# external crate needed, and the dev box has no network reach for a fresh
+# crates.io download anyway.
 
 [dev-dependencies]
 pretty_assertions = "1"

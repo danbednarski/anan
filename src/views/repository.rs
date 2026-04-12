@@ -6,12 +6,12 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
-use crate::app::Message;
+use crate::app::{Message, RepoDraft};
 use crate::db::Snapshot;
 use crate::gramps::enums::repository_type_label;
 use crate::gramps::Repository;
@@ -128,4 +128,38 @@ fn sources_block<'a>(repo: &'a Repository, snap: &'a Snapshot) -> Element<'a, Me
         return text("(none)").size(13).into();
     }
     col.into()
+}
+
+/// Edit-form view for a Repository. Only `name` and `type` are
+/// editable in Phase 4; address / url / note / tag lists are
+/// preserved on update but not exposed in the UI yet.
+pub fn edit_view<'a>(draft: &'a RepoDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New repository" } else { "Edit repository" }).size(24);
+
+    let name_field = column![
+        text("Name").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("Repository name", &draft.name)
+            .on_input(Message::EditRepoName)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let type_field = column![
+        text("Type value (e.g. 1=Library)")
+            .size(11)
+            .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("1", &draft.type_value_s)
+            .on_input(Message::EditRepoType)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body = column![title, name_field, type_field]
+        .spacing(14)
+        .padding(24)
+        .align_x(Alignment::Start);
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

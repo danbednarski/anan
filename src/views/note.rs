@@ -2,13 +2,13 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, section};
 use super::list_pane::{self, ListState};
 use super::widgets::styled_text;
-use crate::app::Message;
+use crate::app::{Message, NoteDraft};
 use crate::db::Snapshot;
 use crate::gramps::enums::note_type_label;
 use crate::gramps::Note;
@@ -79,6 +79,43 @@ pub fn detail_view<'a>(_snap: &'a Snapshot, note: &'a Note) -> Element<'a, Messa
         .align_x(Alignment::Start);
 
     container(scrollable(body))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Edit-form view for a Note. Body is single-line for Phase 4 — iced
+/// 0.13 has a multi-line `text_editor` widget but its API requires a
+/// separate `Content` state object that doesn't fit cleanly into our
+/// Message-passing draft model yet. Notes longer than one line can
+/// still be written and saved; they just render on one visible line
+/// in the form.
+pub fn edit_view<'a>(draft: &'a NoteDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New note" } else { "Edit note" }).size(24);
+
+    let type_field = column![
+        text("Type value (e.g. 1=General)")
+            .size(11)
+            .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("1", &draft.type_value_s)
+            .on_input(Message::EditNoteType)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body_field = column![
+        text("Body").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("Note text", &draft.body)
+            .on_input(Message::EditNoteBody)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body = column![title, type_field, body_field]
+        .spacing(14)
+        .padding(24)
+        .align_x(Alignment::Start);
+    container(body)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

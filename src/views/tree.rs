@@ -156,18 +156,26 @@ pub fn view<'a>(
 
     let mut col = column![].spacing(6).padding(32).align_x(Alignment::Center);
 
-    // Ancestor generations.
+    // Ancestor generations. Layer 0 = home person, 1 = parents,
+    // 2 = grandparents, etc. After reversing, the last entry is
+    // always the home person — skip it here, render it separately.
     let mut layers: Vec<Vec<TreeNode>> = Vec::new();
     collect_generation_nodes(&tree, 0, MAX_DEPTH, &mut layers);
     layers.reverse();
 
+    let num_layers = layers.len();
     for (gen_idx, layer) in layers.into_iter().enumerate() {
-        if gen_idx == MAX_DEPTH { break; }
-        let gen_label: String = match MAX_DEPTH - gen_idx {
+        // Last layer after reverse is the home person — skip.
+        if gen_idx >= num_layers - 1 {
+            break;
+        }
+        // Distance from the home layer.
+        let distance = num_layers - 1 - gen_idx;
+        let gen_label: String = match distance {
             1 => "Parents".to_string(),
             2 => "Grandparents".to_string(),
             3 => "Great-grandparents".to_string(),
-            n => format!("{n}x great-grandparents"),
+            n => format!("{}x great-grandparents", n - 1),
         };
         let mut r = row![].spacing(16).align_y(Alignment::Start);
         for node in layer {

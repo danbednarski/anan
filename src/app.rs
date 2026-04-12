@@ -146,8 +146,10 @@ pub struct App {
     pending_add: Option<PendingAdd>,
 
     /// Whether the sidebar is expanded. Hidden by default; toggled by
-    /// a hamburger-style button in the menu bar.
+    /// the hamburger button in the menu bar.
     sidebar_visible: bool,
+    /// Whether the "Browse all" section in the sidebar is expanded.
+    browse_expanded: bool,
 
     error: Option<String>,
     loading: bool,
@@ -386,6 +388,8 @@ pub enum Message {
     AddSourceUrl(String),
     /// Toggle sidebar visibility.
     ToggleSidebar,
+    /// Toggle the "Browse all" section in the sidebar.
+    ToggleBrowse,
 
     // ---- write / edit flow (Phase 4) -----------------------------------
     /// Start creating a new object in the given view (Tag, Note, Repository).
@@ -545,6 +549,7 @@ impl App {
                 context_target: None,
                 pending_add: None,
                 sidebar_visible: false,
+                browse_expanded: false,
                 error: None,
                 loading,
                 saving: false,
@@ -753,6 +758,10 @@ impl App {
             }
             Message::ToggleSidebar => {
                 self.sidebar_visible = !self.sidebar_visible;
+                Task::none()
+            }
+            Message::ToggleBrowse => {
+                self.browse_expanded = !self.browse_expanded;
                 Task::none()
             }
 
@@ -1390,15 +1399,26 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let menu_bar = row![
-            button(text(if self.sidebar_visible { "<<" } else { ">>" }).size(14))
-                .on_press(Message::ToggleSidebar),
-            button(text("Open DB…")).on_press(Message::OpenDbDialog),
-            text(if self.loading { "loading…" } else { "" }).size(12),
-        ]
-        .spacing(12)
-        .padding(8)
-        .align_y(Alignment::Center);
+        let hamburger = button(
+            text(if self.sidebar_visible { "  x  " } else { "  =  " }).size(16)
+        )
+        .on_press(Message::ToggleSidebar)
+        .style(|_: &Theme, status| {
+            let bg = match status {
+                button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
+                _ => iced::Color::TRANSPARENT,
+            };
+            button::Style {
+                background: Some(iced::Background::Color(bg)),
+                text_color: crate::theme::TEXT,
+                border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
+                shadow: iced::Shadow::default(),
+            }
+        });
+        let mut menu_bar = row![hamburger].spacing(12).padding([6, 12]).align_y(Alignment::Center);
+        if self.loading {
+            menu_bar = menu_bar.push(text("loading...").size(12).color(crate::theme::TEXT_MUTED));
+        }
 
         let body: Element<'_, Message> = match &self.snapshot {
             Some(snap) if self.current == View::Tree => {
@@ -1410,8 +1430,7 @@ impl App {
                     ),
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };
-                let context_bar = self.tree_context_bar(snap);
-                let mut tree_col = column![context_bar, tree_body]
+                let mut tree_col = column![tree_body]
                     .width(Length::Fill)
                     .height(Length::Fill);
 
@@ -1501,38 +1520,81 @@ impl App {
     fn nav_column(&self) -> Element<'_, Message> {
         let mut col = column![].spacing(4).padding(12);
 
-        // Primary nav: Tree + Search.
+        // Open DB button.
+        col = col.push(
+            button(text("Open DB...").size(12))
+                .width(Length::Fill)
+                .on_press(Message::OpenDbDialog)
+                .style(|_: &Theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
+                        _ => crate::theme::ANCESTOR_BG,
+                    };
+                    button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        text_color: crate::theme::TEXT,
+                        border: iced::Border { color: crate::theme::BORDER, width: 1.0, radius: 6.0.into() },
+                        shadow: iced::Shadow::default(),
+                    }
+                }),
+        );
+        col = col.push(text("").size(6));
+
+        // Primary nav.
         for item in View::NAV_ITEMS {
             let label = item.label().to_string();
             let is_current = *item == self.current;
-            let btn = button(text(label).size(14))
+            let btn = button(text(label).size(13))
                 .width(Length::Fill)
                 .on_press(Message::ShowView(*item))
                 .style(move |theme: &Theme, status| nav_style(theme, status, is_current));
             col = col.push(btn);
         }
 
-        // Browse section: list views for power users.
-        col = col.push(text("").size(8)); // spacer
+        // Browse: collapsed under "..." toggle.
+        col = col.push(text("").size(6));
         col = col.push(
-            text("Browse")
-                .size(11)
-                .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        );
-        for item in View::BROWSE_ITEMS {
-            let count = self.count_for(*item);
-            let label = format!("{}  ({count})", item.label());
-            let is_current = *item == self.current;
-            let btn = button(text(label).size(11))
+            button(text("... Browse all").size(11).color(crate::theme::TEXT_MUTED))
                 .width(Length::Fill)
-                .on_press(Message::ShowView(*item))
-                .style(move |theme: &Theme, status| nav_style(theme, status, is_current));
-            col = col.push(btn);
+                .on_press(Message::ToggleBrowse)
+                .style(|_: &Theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
+                        _ => iced::Color::TRANSPARENT,
+                    };
+                    button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        text_color: crate::theme::TEXT_MUTED,
+                        border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
+                        shadow: iced::Shadow::default(),
+                    }
+                }),
+        );
+        if self.browse_expanded {
+            for item in View::BROWSE_ITEMS {
+                let count = self.count_for(*item);
+                let label = format!("{}  ({count})", item.label());
+                let is_current = *item == self.current;
+                let btn = button(text(label).size(11))
+                    .width(Length::Fill)
+                    .on_press(Message::ShowView(*item))
+                    .style(move |theme: &Theme, status| nav_style(theme, status, is_current));
+                col = col.push(btn);
+            }
         }
 
         container(scrollable(col))
             .width(Length::Fixed(150.0))
             .height(Length::Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(iced::Background::Color(crate::theme::CARD)),
+                border: iced::Border {
+                    color: crate::theme::BORDER,
+                    width: 0.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
             .into()
     }
 
@@ -1928,64 +1990,6 @@ impl App {
         repository::recompute(snap, &mut self.repositories);
         tag::recompute(snap, &mut self.tags);
         search::recompute(snap, &mut self.search);
-    }
-
-    /// Context bar for the tree view. Shows either:
-    /// - the home person name (default state)
-    /// - context actions for a right-clicked person
-    /// - "saving..." while a write is in flight
-    fn tree_context_bar<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
-        let mut bar = row![].spacing(8).padding(8).align_y(Alignment::Center);
-
-        if self.saving {
-            bar = bar.push(text("saving...").size(14));
-        } else if let Some(target) = &self.context_target {
-            let name = snap
-                .person(target)
-                .map(|p| p.primary_name.display())
-                .unwrap_or_else(|| "?".to_string());
-            bar = bar.push(text(format!("{name}:")).size(14));
-            bar = bar.push(
-                button(text("Add child")).on_press(Message::TreeStartAdd(AddRelationship::Child)),
-            );
-            bar = bar.push(
-                button(text("Add father"))
-                    .on_press(Message::TreeStartAdd(AddRelationship::Father)),
-            );
-            bar = bar.push(
-                button(text("Add mother"))
-                    .on_press(Message::TreeStartAdd(AddRelationship::Mother)),
-            );
-            bar = bar.push(
-                button(text("Add sibling"))
-                    .on_press(Message::TreeStartAdd(AddRelationship::Sibling)),
-            );
-            bar = bar.push(button(text("x")).on_press(Message::TreeDismissContext));
-        } else {
-            let home_name = self
-                .home_person
-                .as_deref()
-                .and_then(|h| snap.person(h))
-                .map(|p| p.primary_name.display())
-                .unwrap_or_else(|| "(no home)".to_string());
-            bar = bar.push(text(format!("Home: {home_name}")).size(14));
-            bar = bar.push(
-                text("Right-click a person to add relatives")
-                    .size(11)
-                    .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-            );
-        }
-
-        container(bar)
-            .width(Length::Fill)
-            .style(|theme: &Theme| {
-                let palette = theme.extended_palette();
-                container::Style {
-                    background: Some(iced::Background::Color(palette.background.weak.color)),
-                    ..Default::default()
-                }
-            })
-            .into()
     }
 
     /// Modal overlay for the add-person form. Renders on top of the

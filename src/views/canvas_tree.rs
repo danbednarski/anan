@@ -265,20 +265,33 @@ fn build_layout(
         }
 
         // Parent → child connections.
+        // Only draw when parents are in adjacent generation to children.
         let parent_handle = fh.or(mh);
         let Some(ph) = parent_handle else { continue };
-        let Some(&parent_x) = person_x.get(ph) else { continue };
         let parent_gen = gen_map.get(ph).copied().unwrap_or(0);
         let parent_gen_idx = sorted_gens.iter().position(|g| *g == parent_gen).unwrap_or(0);
         let parent_y = PADDING + (parent_gen_idx as f32) * (CARD_H + GEN_GAP);
 
-        // Junction: bottom center of couple.
-        let junction_x = if let (Some(f), Some(m)) = (fh, mh) {
-            let fx = person_x.get(f).copied().unwrap_or(0.0);
-            let mx = person_x.get(m).copied().unwrap_or(0.0);
-            (fx + CARD_W + mx) / 2.0
-        } else {
-            parent_x + CARD_W / 2.0
+        // Junction: midpoint between couple cards if they're close together.
+        // If parents are far apart, use each parent's card center individually.
+        let (fx_opt, mx_opt) = (
+            fh.and_then(|f| person_x.get(f).copied()),
+            mh.and_then(|m| person_x.get(m).copied()),
+        );
+        let junction_x = match (fx_opt, mx_opt) {
+            (Some(fx), Some(mx)) => {
+                let gap = (mx - fx - CARD_W).abs();
+                if gap < CARD_W {
+                    // Adjacent couple: junction between them.
+                    (fx + CARD_W + mx) / 2.0
+                } else {
+                    // Far apart: use the parent that's in this family.
+                    fx + CARD_W / 2.0
+                }
+            }
+            (Some(fx), None) => fx + CARD_W / 2.0,
+            (None, Some(mx)) => mx + CARD_W / 2.0,
+            (None, None) => continue,
         };
         let junction = Point::new(junction_x, parent_y + CARD_H);
 
@@ -286,6 +299,8 @@ fn build_layout(
             if !scope.contains(&cr.r#ref) { continue; }
             let Some(&cx) = person_x.get(&cr.r#ref) else { continue };
             let child_gen = gen_map.get(&cr.r#ref).copied().unwrap_or(0);
+            // Only connect to children in the next generation.
+            if child_gen != parent_gen + 1 { continue; }
             let child_gen_idx = sorted_gens.iter().position(|g| *g == child_gen).unwrap_or(0);
             let child_y = PADDING + (child_gen_idx as f32) * (CARD_H + GEN_GAP);
             let child_top = Point::new(cx + CARD_W / 2.0, child_y);

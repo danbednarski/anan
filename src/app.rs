@@ -1485,19 +1485,14 @@ impl App {
         let body: Element<'_, Message> = match &self.snapshot {
             Some(snap) if matches!(self.current, View::Tree | View::Network) => {
                 let content_body = match &self.home_person {
-                    Some(h) => {
-                        // Tree view defaults to tree layout; Network defaults to list.
-                        // list_mode flips the default for each.
-                        let use_tree_layout = match self.current {
-                            View::Tree => !self.list_mode,
-                            View::Network => self.list_mode,
-                            _ => false,
-                        };
-                        if use_tree_layout {
-                            tree::view(snap, h, self.context_target.as_deref())
-                        } else {
-                            network::view(snap, h)
-                        }
+                    Some(h) => match (self.current, self.list_mode) {
+                        // Family Tree: default = pedigree tree, toggle = flat list of tree scope
+                        (View::Tree, false) => tree::view(snap, h, self.context_target.as_deref()),
+                        (View::Tree, true) => tree::list_view(snap, h),
+                        // Full Network: default = flat list, toggle = extended tree with aunts/uncles
+                        (View::Network, false) => network::view(snap, h),
+                        (View::Network, true) => tree::view_extended(snap, h, self.context_target.as_deref()),
+                        _ => detail_ui::empty(""),
                     }
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };

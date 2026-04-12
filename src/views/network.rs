@@ -202,53 +202,59 @@ pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
 // ====================================================================
 
 /// Render the full network as a proper branching family tree.
-/// Each couple has their children directly below them with
-/// connecting lines. Children who have their own families are
-/// rendered recursively as nested family trees.
+/// Each couple has their children directly below them. Children
+/// who have their own families nest recursively.
+///
+/// Uses BFS generation data to find the actual oldest generation
+/// and starts the tree from there. No dedup - everyone is a full
+/// card (a person who connects two families appears in both).
 pub fn tree_view<'a>(
     snap: &'a Snapshot,
     home_handle: &str,
     context_target: Option<&str>,
 ) -> Element<'a, Message> {
-    // Find all people in the network.
-    let network_handles: HashSet<String> = {
-        let groups = walk_network(snap, home_handle);
-        groups.into_iter().flat_map(|(_, p)| p.into_iter().map(|pi| pi.handle)).collect()
-    };
+    let groups = walk_network(snap, home_handle);
+    let network_handles: HashSet<String> = groups.iter()
+        .flat_map(|(_, p)| p.iter().map(|pi| pi.handle.clone()))
+        .collect();
+    let total = network_handles.len();
 
-    // Find root families: families where neither parent has parents
-    // in the network (i.e., they're the oldest generation).
-    let mut root_families: Vec<String> = Vec::new();
-    let mut child_families: HashSet<String> = HashSet::new();
-
-    for fam in &snap.families {
-        let any_member_in = fam.father_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
-            || fam.mother_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
-            || fam.child_ref_list.iter().any(|cr| network_handles.contains(&cr.r#ref));
-        if !any_member_in { continue; }
-
-        // Check if any parent has their own parent family in the network.
-        let has_parent_family = |handle: &Option<String>| -> bool {
-            handle.as_ref()
-                .and_then(|h| snap.person(h))
-                .map(|p| p.parent_family_list.iter().any(|pfh| {
-                    snap.family(pfh).map(|pf| {
-                        pf.father_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
-                            || pf.mother_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
-                    }).unwrap_or(false)
-                }))
-                .unwrap_or(false)
-        };
-
-        if !has_parent_family(&fam.father_handle) && !has_parent_family(&fam.mother_handle) {
-            root_families.push(fam.handle.clone());
-        } else {
-            child_families.insert(fam.handle.clone());
+    // Build a generation map: handle -> gen number.
+    let mut gen_map: HashMap<String, i32> = HashMap::new();
+    for (gen, people) in &groups {
+        for p in people {
+            gen_map.insert(p.handle.clone(), *gen);
         }
     }
 
-    let total = network_handles.len();
-    let mut rendered: HashSet<String> = HashSet::new();
+    // Find the oldest generation number.
+    let oldest_gen = groups.first().map(|(g, _)| *g).unwrap_or(0);
+
+    // Root families: families where at least one parent is in the
+    // oldest generation.
+    let mut root_families: Vec<String> = Vec::new();
+    let mut used_families: HashSet<String> = HashSet::new();
+    for fam in &snap.families {
+        let father_gen = fam.father_handle.as_ref().and_then(|h| gen_map.get(h)).copied();
+        let mother_gen = fam.mother_handle.as_ref().and_then(|h| gen_map.get(h)).copied();
+        let parent_gen = match (father_gen, mother_gen) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        if parent_gen == Some(oldest_gen) {
+            root_families.push(fam.handle.clone());
+            used_families.insert(fam.handle.clone());
+        }
+    }
+
+    // Also find families that aren't reachable from roots (e.g.,
+    // in-law families that connect at a middle generation). These
+    // are families where parents are in the network but weren't
+    // children of any root family.
+    // We handle these by letting the recursive renderer pick them up
+    // when it encounters a child who has their own family.
 
     let mut col = column![
         text(format!("{total} people in your family network")).size(16).color(theme::TEXT),
@@ -257,12 +263,11 @@ pub fn tree_view<'a>(
     .padding(32)
     .align_x(Alignment::Center);
 
-    // Render each root family as a tree.
-    let mut trees_row = row![].spacing(32).align_y(Alignment::Start);
+    let mut trees_row = row![].spacing(40).align_y(Alignment::Start);
     for fam_handle in &root_families {
         trees_row = trees_row.push(render_family(
             snap, fam_handle, home_handle, context_target,
-            &network_handles, &mut rendered, 0,
+            &network_handles, 0,
         ));
     }
     col = col.push(trees_row);
@@ -278,53 +283,42 @@ pub fn tree_view<'a>(
     container(scroll).width(Length::Fill).height(Length::Fill).into()
 }
 
-/// Recursively render a family: parents on top, children below.
-/// Children who have their own families render as nested family trees.
+/// Recursively render one family: parents on top, children below.
+/// No dedup - everyone gets a full card.
 fn render_family(
     snap: &Snapshot,
     fam_handle: &str,
     home_handle: &str,
     context_target: Option<&str>,
     network: &HashSet<String>,
-    rendered: &mut HashSet<String>,
     depth: usize,
 ) -> Element<'static, Message> {
     let Some(fam) = snap.family(fam_handle) else {
         return text("").into();
     };
-
-    // Limit recursion depth to prevent infinite loops.
-    if depth > 6 { return text("...").size(10).into(); }
+    if depth > 8 { return text("...").size(10).into(); }
 
     let mut family_col = column![].spacing(4).align_x(Alignment::Center);
 
     // Parents row.
     let mut parents = row![].spacing(0).align_y(Alignment::Center);
+    let has_father = fam.father_handle.as_ref()
+        .and_then(|h| snap.person(h)).is_some();
+    let has_mother = fam.mother_handle.as_ref()
+        .and_then(|h| snap.person(h)).is_some();
+
     if let Some(father) = fam.father_handle.as_ref().and_then(|h| snap.person(h)) {
-        let is_dup = !rendered.insert(father.handle.clone());
-        let info = mk_info(father, snap, home_handle);
-        if is_dup {
-            parents = parents.push(ref_card(&info));
-        } else {
-            parents = parents.push(network_card(info, context_target));
-        }
+        parents = parents.push(network_card(mk_info(father, snap, home_handle), context_target));
     }
-    if fam.father_handle.is_some() && fam.mother_handle.is_some() {
+    if has_father && has_mother {
         parents = parents.push(couple_connector());
     }
     if let Some(mother) = fam.mother_handle.as_ref().and_then(|h| snap.person(h)) {
-        let is_dup = !rendered.insert(mother.handle.clone());
-        let info = mk_info(mother, snap, home_handle);
-        if is_dup {
-            parents = parents.push(ref_card(&info));
-        } else {
-            parents = parents.push(network_card(info, context_target));
-        }
+        parents = parents.push(network_card(mk_info(mother, snap, home_handle), context_target));
     }
     family_col = family_col.push(parents);
 
-    // Children: each child is either a simple card or a nested
-    // family tree if they have their own family.
+    // Children.
     let children: Vec<&crate::gramps::family::ChildRef> = fam.child_ref_list.iter()
         .filter(|cr| network.contains(&cr.r#ref))
         .collect();
@@ -335,33 +329,25 @@ fn render_family(
         let mut children_row = row![].spacing(16).align_y(Alignment::Start);
         for cr in children {
             let Some(child) = snap.person(&cr.r#ref) else { continue };
-            let is_dup = !rendered.insert(child.handle.clone());
 
             // Does this child have their own family (as parent)?
-            let child_family = if !is_dup {
-                child.family_list.iter().find(|fh| {
-                    snap.family(fh).map(|f| {
-                        f.child_ref_list.iter().any(|c| network.contains(&c.r#ref))
-                            || f.mother_handle.as_ref().map(|h| network.contains(h)).unwrap_or(false)
-                            || f.father_handle.as_ref().map(|h| network.contains(h)).unwrap_or(false)
-                    }).unwrap_or(false)
-                }).cloned()
-            } else {
-                None
-            };
+            let child_family = child.family_list.iter().find(|fh| {
+                snap.family(fh).map(|f| {
+                    // Family has at least one child or spouse in network.
+                    f.child_ref_list.iter().any(|c| network.contains(&c.r#ref))
+                        || f.mother_handle.as_ref().map(|h| network.contains(h)).unwrap_or(false)
+                        || f.father_handle.as_ref().map(|h| network.contains(h)).unwrap_or(false)
+                }).unwrap_or(false)
+            }).cloned();
 
             if let Some(child_fam_handle) = child_family {
-                // Render child's family as a nested tree.
                 children_row = children_row.push(
-                    render_family(snap, &child_fam_handle, home_handle, context_target, network, rendered, depth + 1)
+                    render_family(snap, &child_fam_handle, home_handle, context_target, network, depth + 1)
                 );
             } else {
-                let info = mk_info(child, snap, home_handle);
-                if is_dup {
-                    children_row = children_row.push(ref_card(&info));
-                } else {
-                    children_row = children_row.push(network_card(info, context_target));
-                }
+                children_row = children_row.push(
+                    network_card(mk_info(child, snap, home_handle), context_target)
+                );
             }
         }
         family_col = family_col.push(children_row);
@@ -386,23 +372,6 @@ fn mk_info(person: &crate::gramps::Person, snap: &Snapshot, home_handle: &str) -
         birth,
         is_home: person.handle == home_handle,
     }
-}
-
-/// Small reference card for already-rendered person.
-fn ref_card(person: &PersonInfo) -> Element<'static, Message> {
-    let handle = person.handle.clone();
-    button(
-        container(text(format!("{} *", person.name)).size(10).color(theme::TEXT_MUTED))
-            .padding([4, 8]),
-    )
-    .on_press(Message::TreeHome(handle))
-    .style(|_: &Theme, _| button::Style {
-        background: None,
-        text_color: theme::TEXT_MUTED,
-        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 6.0.into() },
-        shadow: iced::Shadow::default(),
-    })
-    .into()
 }
 
 /// Vertical connector line from parents to children.

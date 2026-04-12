@@ -13,5 +13,14 @@ fn main() -> iced::Result {
     iced::application(App::title, App::update, App::view)
         .theme(App::theme)
         .subscription(App::subscription)
+        .window(iced::window::Settings {
+            #[cfg(target_os = "macos")]
+            platform_specific: iced::window::settings::PlatformSpecific {
+                titlebar_transparent: true,
+                fullsize_content_view: true,
+                title_hidden: true,
+            },
+            ..Default::default()
+        })
         .run_with(App::new)
 }

@@ -64,7 +64,6 @@ impl View {
     const NAV_ITEMS: &'static [View] = &[
         View::Tree,
         View::Network,
-        View::Search,
     ];
 
     /// Secondary items accessible via the "Browse" section in the
@@ -150,6 +149,10 @@ pub struct App {
     sidebar_visible: bool,
     /// Whether the "Browse all" section in the sidebar is expanded.
     browse_expanded: bool,
+    /// Whether the inline search bar in the top bar is active.
+    search_bar_active: bool,
+    /// The current query in the inline search bar.
+    search_bar_query: String,
 
     error: Option<String>,
     loading: bool,
@@ -390,6 +393,12 @@ pub enum Message {
     ToggleSidebar,
     /// Toggle the "Browse all" section in the sidebar.
     ToggleBrowse,
+    /// Toggle the inline search bar.
+    SearchBarToggle,
+    /// Typing in the inline search bar.
+    SearchBarInput(String),
+    /// Hit Enter in the search bar - jump to best match.
+    SearchBarSubmit,
 
     // ---- write / edit flow (Phase 4) -----------------------------------
     /// Start creating a new object in the given view (Tag, Note, Repository).
@@ -550,6 +559,8 @@ impl App {
                 pending_add: None,
                 sidebar_visible: false,
                 browse_expanded: false,
+                search_bar_active: false,
+                search_bar_query: String::new(),
                 error: None,
                 loading,
                 saving: false,
@@ -762,6 +773,35 @@ impl App {
             }
             Message::ToggleBrowse => {
                 self.browse_expanded = !self.browse_expanded;
+                Task::none()
+            }
+            Message::SearchBarToggle => {
+                self.search_bar_active = !self.search_bar_active;
+                if !self.search_bar_active {
+                    self.search_bar_query.clear();
+                }
+                Task::none()
+            }
+            Message::SearchBarInput(q) => {
+                self.search_bar_query = q;
+                Task::none()
+            }
+            Message::SearchBarSubmit => {
+                // Find the first person whose name contains the query
+                // and re-home on them.
+                let q = self.search_bar_query.trim().to_lowercase();
+                if !q.is_empty() {
+                    if let Some(snap) = &self.snapshot {
+                        if let Some(person) = snap.persons.iter().find(|p| {
+                            p.primary_name.display().to_lowercase().contains(&q)
+                        }) {
+                            self.home_person = Some(person.handle.clone());
+                            self.current = View::Tree;
+                        }
+                    }
+                }
+                self.search_bar_active = false;
+                self.search_bar_query.clear();
                 Task::none()
             }
 
@@ -1400,7 +1440,7 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let hamburger = button(
-            text(if self.sidebar_visible { "  x  " } else { "  =  " }).size(16)
+            text(if self.sidebar_visible { "  \u{2715}  " } else { "  \u{2630}  " }).size(20)
         )
         .on_press(Message::ToggleSidebar)
         .style(|_: &Theme, status| {
@@ -1415,9 +1455,66 @@ impl App {
                 shadow: iced::Shadow::default(),
             }
         });
-        let mut menu_bar = row![hamburger].spacing(12).padding([6, 12]).align_y(Alignment::Center);
+
+        // View toggle: map (tree) vs list.
+        let is_tree = self.current == View::Tree;
+        let view_toggle = button(
+            // Grid icon for list, tree icon for map.
+            text(if is_tree { " \u{2637} " } else { " \u{229E} " }).size(18)
+        )
+        .on_press(if is_tree {
+            Message::ShowView(View::Persons)
+        } else {
+            Message::ShowView(View::Tree)
+        })
+        .style(|_: &Theme, status| {
+            let bg = match status {
+                button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
+                _ => iced::Color::TRANSPARENT,
+            };
+            button::Style {
+                background: Some(iced::Background::Color(bg)),
+                text_color: crate::theme::TEXT,
+                border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
+                shadow: iced::Shadow::default(),
+            }
+        });
+
+        // Inline search: icon that expands to a search bar.
+        let search_element: Element<'_, Message> = if self.search_bar_active {
+            text_input("Search people...", &self.search_bar_query)
+                .on_input(Message::SearchBarInput)
+                .on_submit(Message::SearchBarSubmit)
+                .padding(6)
+                .width(Length::Fixed(220.0))
+                .into()
+        } else {
+            button(text(" \u{1F50D} ").size(16))
+                .on_press(Message::SearchBarToggle)
+                .style(|_: &Theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
+                        _ => iced::Color::TRANSPARENT,
+                    };
+                    button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        text_color: crate::theme::TEXT,
+                        border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
+                        shadow: iced::Shadow::default(),
+                    }
+                })
+                .into()
+        };
+
+        let mut menu_bar = row![hamburger, view_toggle, search_element]
+            .spacing(8)
+            .padding([6, 12])
+            .align_y(Alignment::Center);
         if self.loading {
             menu_bar = menu_bar.push(text("loading...").size(12).color(crate::theme::TEXT_MUTED));
+        }
+        if self.saving {
+            menu_bar = menu_bar.push(text("saving...").size(12).color(crate::theme::TEXT_MUTED));
         }
 
         let body: Element<'_, Message> = match &self.snapshot {

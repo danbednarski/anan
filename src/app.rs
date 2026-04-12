@@ -2,13 +2,15 @@
 //!
 //! State model:
 //!
-//! - `snapshot` holds the currently-loaded `Snapshot` (all persons, families,
-//!   events, places). `None` until a DB is opened.
-//! - `order` is the filtered+sorted list of indices into `snapshot.persons`.
-//! - `selected` is a position inside `order`, not inside `snapshot.persons`,
-//!   so that clearing the filter doesn't strand the highlight.
+//! - `snapshot` holds the currently-loaded [`Snapshot`]. `None` until a
+//!   DB is opened.
+//! - `current_view` discriminates between primary-type panels. Each
+//!   type owns its own [`ListState`] (filter query + sort order +
+//!   selection) so switching tabs preserves each tab's context.
+//! - Navigation and search messages always apply to the *currently
+//!   visible* view — the update fn dispatches on `current_view`.
 //!
-//! Message flow:
+//! Message flow for Open-DB:
 //!
 //! ```text
 //!   OpenDbDialog  ──►  rfd async picker  ──►  FilePicked(Some(path))
@@ -20,57 +22,126 @@
 //!                                              DbOpened(Result)
 //! ```
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
 
 use crate::db::{self, Snapshot};
-use crate::gramps::Person;
-use crate::views::{person_detail, person_list};
+use crate::views::list_pane::ListState;
+use crate::views::search::{SearchHit, SearchState};
+use crate::views::{
+    citation, detail_ui, event, family, media, note, person, place, repository, search, source,
+    tag,
+};
 
 /// Stable id for the search `text_input` so ⌘F can focus it.
 pub const SEARCH_INPUT_ID: &str = "search-input";
 
+/// Which primary-type panel is currently shown in the middle + detail
+/// columns. Order matches the sidebar navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Persons,
+    Families,
+    Events,
+    Places,
+    Sources,
+    Citations,
+    Media,
+    Notes,
+    Repositories,
+    Tags,
+    Search,
+}
+
+impl View {
+    const NAV_ITEMS: &'static [View] = &[
+        View::Persons,
+        View::Families,
+        View::Events,
+        View::Places,
+        View::Sources,
+        View::Citations,
+        View::Media,
+        View::Notes,
+        View::Repositories,
+        View::Tags,
+        View::Search,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            View::Persons => "Persons",
+            View::Families => "Families",
+            View::Events => "Events",
+            View::Places => "Places",
+            View::Sources => "Sources",
+            View::Citations => "Citations",
+            View::Media => "Media",
+            View::Notes => "Notes",
+            View::Repositories => "Repositories",
+            View::Tags => "Tags",
+            View::Search => "Search",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct App {
     snapshot: Option<Snapshot>,
-    /// Indices into `snapshot.persons`, filtered by `query` and sorted.
-    order: Vec<usize>,
-    /// Position inside `order` (not inside `snapshot.persons`).
-    selected: Option<usize>,
-    query: String,
+    current: View,
+
+    persons: ListState,
+    families: ListState,
+    events: ListState,
+    places: ListState,
+    sources: ListState,
+    citations: ListState,
+    media: ListState,
+    notes: ListState,
+    repositories: ListState,
+    tags: ListState,
+    search: SearchState,
+
     error: Option<String>,
     loading: bool,
-    /// Denormalized lookup from person handle → person, rebuilt whenever
-    /// the snapshot changes. Used by the detail view to resolve family
-    /// father/mother references without scanning the Vec each time.
-    persons_by_handle: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// File menu: open a new Gramps DB.
     OpenDbDialog,
+    /// rfd picker result.
     FilePicked(Option<PathBuf>),
-    DbOpened(Result<Snapshot, String>),
+    /// Blocking loader result. Boxed because `Snapshot` is large and we
+    /// want small enum variants for the common messages.
+    DbOpened(Box<Result<Snapshot, String>>),
+    /// Sidebar navigation click.
+    ShowView(View),
+    /// Search box input — applies to the current view.
     SearchChanged(String),
-    SelectPerson(usize),
+    /// Click on a row in the current view's list — index is a position
+    /// inside the current view's filtered `order` (or `hits` for Search).
+    SelectIndex(usize),
+    /// Arrow key navigation on the current list.
     NavigateUp,
     NavigateDown,
+    /// Cmd+F — focus the search box.
     FocusSearch,
+    /// Escape — dismiss error banner.
     Dismiss,
+    /// "Open in its own view" from a Search result row.
+    OpenSearchHit(SearchHit),
 }
 
 impl App {
-    /// Build initial app state. If `test-fixtures/sample.db` exists next to
-    /// the binary's manifest, auto-load it so developers get an instant
+    /// Build initial app state. If `test-fixtures/sample.db` exists next
+    /// to the crate manifest, auto-load it so developers get an instant
     /// populated view. Otherwise start empty.
     pub fn new() -> (Self, Task<Message>) {
-        // Auto-load the test fixture when present. Path is resolved at
-        // compile time so `cargo run` works from any cwd.
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/sample.db");
         let (loading, initial) = if fixture.exists() {
@@ -82,12 +153,20 @@ impl App {
         (
             App {
                 snapshot: None,
-                order: Vec::new(),
-                selected: None,
-                query: String::new(),
+                current: View::Persons,
+                persons: ListState::default(),
+                families: ListState::default(),
+                events: ListState::default(),
+                places: ListState::default(),
+                sources: ListState::default(),
+                citations: ListState::default(),
+                media: ListState::default(),
+                notes: ListState::default(),
+                repositories: ListState::default(),
+                tags: ListState::default(),
+                search: SearchState::default(),
                 error: None,
                 loading,
-                persons_by_handle: HashMap::new(),
             },
             initial,
         )
@@ -123,24 +202,24 @@ impl App {
             }
             Message::DbOpened(result) => {
                 self.loading = false;
-                match result {
+                match *result {
                     Ok(snap) => {
                         tracing::info!(
                             path = %snap.path.display(),
                             persons = snap.persons.len(),
                             families = snap.families.len(),
                             events = snap.events.len(),
+                            places = snap.places.len(),
+                            sources = snap.sources.len(),
+                            citations = snap.citations.len(),
+                            media = snap.media.len(),
+                            notes = snap.notes.len(),
+                            repositories = snap.repositories.len(),
+                            tags = snap.tags.len(),
                             "loaded snapshot"
                         );
-                        self.persons_by_handle = snap
-                            .persons
-                            .iter()
-                            .enumerate()
-                            .map(|(i, p)| (p.handle.clone(), i))
-                            .collect();
                         self.snapshot = Some(snap);
-                        self.recompute_order();
-                        self.selected = if self.order.is_empty() { None } else { Some(0) };
+                        self.recompute_all();
                     }
                     Err(err) => {
                         tracing::error!(error = %err, "failed to load snapshot");
@@ -149,41 +228,37 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SearchChanged(q) => {
-                self.query = q;
-                self.recompute_order();
-                self.selected = if self.order.is_empty() { None } else { Some(0) };
+            Message::ShowView(view) => {
+                self.current = view;
                 Task::none()
             }
-            Message::SelectPerson(idx) => {
-                if idx < self.order.len() {
-                    self.selected = Some(idx);
+            Message::SearchChanged(q) => {
+                self.set_current_query(q);
+                self.recompute_current();
+                Task::none()
+            }
+            Message::SelectIndex(idx) => {
+                let state = self.current_list_state_mut();
+                if idx < state.order.len() {
+                    state.selected = Some(idx);
                 }
                 Task::none()
             }
             Message::NavigateUp => {
-                if let Some(i) = self.selected {
-                    if i > 0 {
-                        self.selected = Some(i - 1);
-                    }
-                } else if !self.order.is_empty() {
-                    self.selected = Some(0);
-                }
+                self.current_list_state_mut().navigate_up();
                 Task::none()
             }
             Message::NavigateDown => {
-                if let Some(i) = self.selected {
-                    if i + 1 < self.order.len() {
-                        self.selected = Some(i + 1);
-                    }
-                } else if !self.order.is_empty() {
-                    self.selected = Some(0);
-                }
+                self.current_list_state_mut().navigate_down();
                 Task::none()
             }
             Message::FocusSearch => text_input::focus(text_input::Id::new(SEARCH_INPUT_ID)),
             Message::Dismiss => {
                 self.error = None;
+                Task::none()
+            }
+            Message::OpenSearchHit(hit) => {
+                self.jump_to_hit(hit);
                 Task::none()
             }
         }
@@ -198,30 +273,19 @@ impl App {
         .padding(8)
         .align_y(Alignment::Center);
 
+        let nav = self.nav_column();
+
         let body: Element<'_, Message> = match &self.snapshot {
-            Some(snap) => {
-                let list = person_list::view(
-                    &snap.persons,
-                    &self.order,
-                    self.selected,
-                    &self.query,
-                );
-                let detail = match self.selected_person() {
-                    Some(person) => person_detail::view(
-                        person,
-                        &snap.events,
-                        &snap.families,
-                        &snap.places,
-                        &snap.persons,
-                        &self.persons_by_handle,
-                    ),
-                    None => person_detail::placeholder(),
-                };
-                row![list, vertical_separator(), detail]
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            }
+            Some(snap) => row![
+                nav,
+                vertical_separator(),
+                self.list_pane(snap),
+                vertical_separator(),
+                self.detail_pane(snap),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
             None => container(text(if self.loading {
                 "Loading…"
             } else {
@@ -267,71 +331,239 @@ impl App {
         keyboard::on_key_press(global_key)
     }
 
-    fn selected_person(&self) -> Option<&Person> {
-        let snap = self.snapshot.as_ref()?;
-        let i = self.selected?;
-        let idx = *self.order.get(i)?;
-        snap.persons.get(idx)
+    // --- view helpers ----------------------------------------------------
+
+    fn nav_column(&self) -> Element<'_, Message> {
+        let mut col = column![text("Views").size(12).color(iced::Color::from_rgb(
+            0.5, 0.5, 0.5
+        ))]
+        .spacing(4)
+        .padding(12);
+        for item in View::NAV_ITEMS {
+            let count = self.count_for(*item);
+            let label = format!("{}  ({count})", item.label());
+            let is_current = *item == self.current;
+            let btn = button(text(label).size(13))
+                .width(Length::Fill)
+                .on_press(Message::ShowView(*item))
+                .style(move |theme: &Theme, status| nav_style(theme, status, is_current));
+            col = col.push(btn);
+        }
+        container(scrollable(col))
+            .width(Length::Fixed(160.0))
+            .height(Length::Fill)
+            .into()
     }
 
-    /// Recompute `order` from `snapshot.persons` + current `query`.
-    /// Sorts by primary surname then given name, case-insensitive.
-    fn recompute_order(&mut self) {
+    fn list_pane<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
+        match self.current {
+            View::Persons => person::list_view(snap, &self.persons),
+            View::Families => family::list_view(snap, &self.families),
+            View::Events => event::list_view(snap, &self.events),
+            View::Places => place::list_view(snap, &self.places),
+            View::Sources => source::list_view(snap, &self.sources),
+            View::Citations => citation::list_view(snap, &self.citations),
+            View::Media => media::list_view(snap, &self.media),
+            View::Notes => note::list_view(snap, &self.notes),
+            View::Repositories => repository::list_view(snap, &self.repositories),
+            View::Tags => tag::list_view(snap, &self.tags),
+            View::Search => search::list_view(snap, &self.search),
+        }
+    }
+
+    fn detail_pane<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
+        let placeholder = || detail_ui::empty("Select a row to see details");
+        match self.current {
+            View::Persons => match self.persons.selected_item() {
+                Some(i) => snap
+                    .persons
+                    .get(i)
+                    .map(|p| person::detail_view(snap, p))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Families => match self.families.selected_item() {
+                Some(i) => snap
+                    .families
+                    .get(i)
+                    .map(|f| family::detail_view(snap, f))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Events => match self.events.selected_item() {
+                Some(i) => snap
+                    .events
+                    .get(i)
+                    .map(|e| event::detail_view(snap, e))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Places => match self.places.selected_item() {
+                Some(i) => snap
+                    .places
+                    .get(i)
+                    .map(|p| place::detail_view(snap, p))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Sources => match self.sources.selected_item() {
+                Some(i) => snap
+                    .sources
+                    .get(i)
+                    .map(|s| source::detail_view(snap, s))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Citations => match self.citations.selected_item() {
+                Some(i) => snap
+                    .citations
+                    .get(i)
+                    .map(|c| citation::detail_view(snap, c))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Media => match self.media.selected_item() {
+                Some(i) => snap
+                    .media
+                    .get(i)
+                    .map(|m| media::detail_view(snap, m))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Notes => match self.notes.selected_item() {
+                Some(i) => snap
+                    .notes
+                    .get(i)
+                    .map(|n| note::detail_view(snap, n))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Repositories => match self.repositories.selected_item() {
+                Some(i) => snap
+                    .repositories
+                    .get(i)
+                    .map(|r| repository::detail_view(snap, r))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Tags => match self.tags.selected_item() {
+                Some(i) => snap
+                    .tags
+                    .get(i)
+                    .map(|t| tag::detail_view(snap, t))
+                    .unwrap_or_else(placeholder),
+                None => placeholder(),
+            },
+            View::Search => match self
+                .search
+                .list
+                .selected
+                .and_then(|i| self.search.hits.get(i).copied())
+            {
+                Some(hit) => search::detail_view(snap, hit),
+                None => placeholder(),
+            },
+        }
+    }
+
+    // --- state helpers ---------------------------------------------------
+
+    fn current_list_state_mut(&mut self) -> &mut ListState {
+        match self.current {
+            View::Persons => &mut self.persons,
+            View::Families => &mut self.families,
+            View::Events => &mut self.events,
+            View::Places => &mut self.places,
+            View::Sources => &mut self.sources,
+            View::Citations => &mut self.citations,
+            View::Media => &mut self.media,
+            View::Notes => &mut self.notes,
+            View::Repositories => &mut self.repositories,
+            View::Tags => &mut self.tags,
+            View::Search => &mut self.search.list,
+        }
+    }
+
+    fn set_current_query(&mut self, q: String) {
+        self.current_list_state_mut().query = q;
+    }
+
+    fn recompute_current(&mut self) {
         let Some(snap) = self.snapshot.as_ref() else {
-            self.order.clear();
             return;
         };
-        let q = self.query.trim().to_lowercase();
-
-        self.order = snap
-            .persons
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                if q.is_empty() {
-                    return true;
-                }
-                let hay = format!(
-                    "{} {} {}",
-                    p.primary_name.first_name,
-                    p.primary_name
-                        .surname_list
-                        .iter()
-                        .map(|s| s.surname.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    p.gramps_id,
-                )
-                .to_lowercase();
-                hay.contains(&q)
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        self.order.sort_by(|&a, &b| {
-            let pa = &snap.persons[a];
-            let pb = &snap.persons[b];
-            let sa = primary_surname(pa).to_lowercase();
-            let sb = primary_surname(pb).to_lowercase();
-            sa.cmp(&sb)
-                .then_with(|| {
-                    pa.primary_name
-                        .first_name
-                        .to_lowercase()
-                        .cmp(&pb.primary_name.first_name.to_lowercase())
-                })
-        });
+        match self.current {
+            View::Persons => person::recompute(snap, &mut self.persons),
+            View::Families => family::recompute(snap, &mut self.families),
+            View::Events => event::recompute(snap, &mut self.events),
+            View::Places => place::recompute(snap, &mut self.places),
+            View::Sources => source::recompute(snap, &mut self.sources),
+            View::Citations => citation::recompute(snap, &mut self.citations),
+            View::Media => media::recompute(snap, &mut self.media),
+            View::Notes => note::recompute(snap, &mut self.notes),
+            View::Repositories => repository::recompute(snap, &mut self.repositories),
+            View::Tags => tag::recompute(snap, &mut self.tags),
+            View::Search => search::recompute(snap, &mut self.search),
+        }
     }
-}
 
-fn primary_surname(p: &Person) -> &str {
-    p.primary_name
-        .surname_list
-        .iter()
-        .find(|s| s.primary)
-        .or_else(|| p.primary_name.surname_list.first())
-        .map(|s| s.surname.as_str())
-        .unwrap_or("")
+    fn recompute_all(&mut self) {
+        let Some(snap) = self.snapshot.as_ref() else {
+            return;
+        };
+        person::recompute(snap, &mut self.persons);
+        family::recompute(snap, &mut self.families);
+        event::recompute(snap, &mut self.events);
+        place::recompute(snap, &mut self.places);
+        source::recompute(snap, &mut self.sources);
+        citation::recompute(snap, &mut self.citations);
+        media::recompute(snap, &mut self.media);
+        note::recompute(snap, &mut self.notes);
+        repository::recompute(snap, &mut self.repositories);
+        tag::recompute(snap, &mut self.tags);
+        search::recompute(snap, &mut self.search);
+    }
+
+    fn count_for(&self, view: View) -> usize {
+        let Some(snap) = self.snapshot.as_ref() else {
+            return 0;
+        };
+        match view {
+            View::Persons => snap.persons.len(),
+            View::Families => snap.families.len(),
+            View::Events => snap.events.len(),
+            View::Places => snap.places.len(),
+            View::Sources => snap.sources.len(),
+            View::Citations => snap.citations.len(),
+            View::Media => snap.media.len(),
+            View::Notes => snap.notes.len(),
+            View::Repositories => snap.repositories.len(),
+            View::Tags => snap.tags.len(),
+            View::Search => self.search.hits.len(),
+        }
+    }
+
+    /// Jump to the view that owns a search hit and select it.
+    fn jump_to_hit(&mut self, hit: SearchHit) {
+        use crate::views::search::HitKind;
+        let (view, state): (View, &mut ListState) = match hit.kind {
+            HitKind::Person => (View::Persons, &mut self.persons),
+            HitKind::Family => (View::Families, &mut self.families),
+            HitKind::Event => (View::Events, &mut self.events),
+            HitKind::Place => (View::Places, &mut self.places),
+            HitKind::Source => (View::Sources, &mut self.sources),
+            HitKind::Citation => (View::Citations, &mut self.citations),
+            HitKind::Media => (View::Media, &mut self.media),
+            HitKind::Note => (View::Notes, &mut self.notes),
+            HitKind::Repository => (View::Repositories, &mut self.repositories),
+            HitKind::Tag => (View::Tags, &mut self.tags),
+        };
+        self.current = view;
+        // Position *inside order* of the raw-item index we want to highlight.
+        if let Some(pos) = state.order.iter().position(|&i| i == hit.index) {
+            state.selected = Some(pos);
+        }
+    }
 }
 
 fn global_key(key: Key, modifiers: Modifiers) -> Option<Message> {
@@ -358,6 +590,34 @@ fn vertical_separator<'a>() -> Element<'a, Message> {
         .into()
 }
 
+fn nav_style(theme: &Theme, status: button::Status, is_current: bool) -> button::Style {
+    let palette = theme.extended_palette();
+    let base = button::Style {
+        background: None,
+        text_color: palette.background.base.text,
+        border: iced::Border {
+            color: iced::Color::TRANSPARENT,
+            width: 0.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    };
+    if is_current {
+        return button::Style {
+            background: Some(iced::Background::Color(palette.primary.base.color)),
+            text_color: palette.primary.base.text,
+            ..base
+        };
+    }
+    match status {
+        button::Status::Hovered | button::Status::Pressed => button::Style {
+            background: Some(iced::Background::Color(palette.background.weak.color)),
+            ..base
+        },
+        _ => base,
+    }
+}
+
 /// Open a native file dialog and return the chosen path, if any.
 async fn pick_file() -> Option<PathBuf> {
     let handle = rfd::AsyncFileDialog::new()
@@ -370,10 +630,12 @@ async fn pick_file() -> Option<PathBuf> {
 
 /// Load a snapshot from disk on a blocking worker so the UI thread stays
 /// responsive. Errors are flattened to `String` for iced message-safety.
-async fn load_async(path: PathBuf) -> Result<Snapshot, String> {
-    match tokio::task::spawn_blocking(move || db::load_snapshot(&path)).await {
-        Ok(Ok(snap)) => Ok(snap),
-        Ok(Err(err)) => Err(format!("{err:#}")),
-        Err(join) => Err(format!("task panicked: {join}")),
-    }
+async fn load_async(path: PathBuf) -> Box<Result<Snapshot, String>> {
+    Box::new(
+        match tokio::task::spawn_blocking(move || db::load_snapshot(&path)).await {
+            Ok(Ok(snap)) => Ok(snap),
+            Ok(Err(err)) => Err(format!("{err:#}")),
+            Err(join) => Err(format!("task panicked: {join}")),
+        },
+    )
 }

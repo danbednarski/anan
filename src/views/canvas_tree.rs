@@ -190,11 +190,12 @@ fn build_layout(
         let mut ordered: Vec<OrderedItem> = Vec::new();
 
         for fam in &snap.families {
-            let fh = fam.father_handle.as_ref().filter(|h| people.contains(h) && !paired.contains(*h));
-            let mh = fam.mother_handle.as_ref().filter(|h| people.contains(h) && !paired.contains(*h));
+            let fh = fam.father_handle.as_ref().filter(|h| people.contains(h));
+            let mh = fam.mother_handle.as_ref().filter(|h| people.contains(h));
             if let (Some(f), Some(m)) = (fh, mh) {
-                paired.insert(f.clone());
-                paired.insert(m.clone());
+                // Allow a person to appear in multiple couples (Gramps-style).
+                // Only skip if BOTH partners are already paired together.
+                if paired.contains(f) && paired.contains(m) { continue; }
                 // Position couple near their parents from the generation above.
                 let k1 = parent_center_x(snap, f, &person_x);
                 let k2 = parent_center_x(snap, m, &person_x);
@@ -251,15 +252,17 @@ fn build_layout(
         let fh = fam.father_handle.as_ref().filter(|h| scope.contains(*h));
         let mh = fam.mother_handle.as_ref().filter(|h| scope.contains(*h));
 
-        // Couple connector.
+        // Couple connector: draw between adjacent partners.
         if let (Some(f), Some(m)) = (fh, mh) {
             if let (Some(&fx), Some(&mx)) = (person_x.get(f), person_x.get(m)) {
                 let fg = gen_map.get(f).copied().unwrap_or(0);
                 let gen_idx = sorted_gens.iter().position(|g| *g == fg).unwrap_or(0);
                 let y = PADDING + (gen_idx as f32) * (CARD_H + GEN_GAP) + CARD_H / 2.0;
+                // Use the pair that's closest (in case of duplicate entries).
+                let (left, right) = if fx < mx { (fx, mx) } else { (mx, fx) };
                 conns.push(Conn {
-                    from: Point::new(fx + CARD_W, y),
-                    to: Point::new(mx, y),
+                    from: Point::new(left + CARD_W, y),
+                    to: Point::new(right, y),
                 });
             }
         }

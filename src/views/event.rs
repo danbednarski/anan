@@ -2,13 +2,14 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
 use super::widgets::date_display;
-use crate::app::Message;
+use super::widgets::date_edit::{self, DateMessages};
+use crate::app::{EventDraft, Message};
 use crate::db::Snapshot;
 use crate::gramps::enums::event_type_label;
 use crate::gramps::Event;
@@ -150,4 +151,68 @@ fn participants_block<'a>(ev: &'a Event, snap: &'a Snapshot) -> Element<'a, Mess
         return text("(none)").size(13).into();
     }
     col.into()
+}
+
+/// Edit-form view for an Event. Type value is numeric for now
+/// (see `gramps::enums::event_type_label` for the mapping);
+/// description is free-form; place is referenced by Gramps ID; the
+/// date uses the shared `date_edit` widget so Citation in Phase 6b
+/// can reuse it unchanged.
+pub fn edit_view<'a>(draft: &'a EventDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New event" } else { "Edit event" }).size(24);
+    let label_color = iced::Color::from_rgb(0.5, 0.5, 0.5);
+    let label = |s: &'static str| text(s).size(11).color(label_color);
+
+    let type_field = column![
+        label("Type value (12=Birth · 13=Death · 15=Baptism · 19=Burial · 42=Residence · …)"),
+        text_input("12", &draft.type_value_s)
+            .on_input(Message::EditEventType)
+            .padding(6)
+            .width(Length::Fixed(90.0)),
+    ]
+    .spacing(4);
+
+    let description_field = column![
+        label("Description"),
+        text_input("", &draft.description)
+            .on_input(Message::EditEventDescription)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let place_field = column![
+        label("Place — Gramps ID (e.g. P0001), blank for none"),
+        text_input("P####", &draft.place_gid)
+            .on_input(Message::EditEventPlace)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let date_widget = date_edit::view(
+        &draft.date,
+        &DateMessages {
+            on_year: Message::EditEventDateYear,
+            on_month: Message::EditEventDateMonth,
+            on_day: Message::EditEventDateDay,
+            on_modifier: Message::EditEventDateModifier,
+            on_quality: Message::EditEventDateQuality,
+            on_text: Message::EditEventDateText,
+        },
+    );
+
+    let body = column![
+        title,
+        type_field,
+        description_field,
+        place_field,
+        date_widget,
+    ]
+    .spacing(16)
+    .padding(24)
+    .align_x(Alignment::Start);
+
+    container(scrollable(body))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

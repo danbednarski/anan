@@ -340,6 +340,15 @@ fn insert(txn: &Transaction, person: &Person) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite an already-mutated `Person` row without going through
+/// the public update API (which re-applies the editable subset).
+/// Used by Phase 6a Family CRUD to keep reverse links consistent
+/// (appending/removing a family from family_list / parent_family_list).
+pub(super) fn save_row(txn: &Transaction, person: &mut Person) -> Result<()> {
+    person.change = now_unix();
+    update_row(txn, person)
+}
+
 fn update_row(txn: &Transaction, person: &Person) -> Result<()> {
     let json = to_json(person)?;
     let surname = primary_surname_string(person);

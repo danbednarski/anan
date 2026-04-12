@@ -139,6 +139,40 @@ pub enum EditDraft {
     Note(NoteDraft),
     Repository(RepoDraft),
     Person(PersonDraft),
+    Family(FamilyDraft),
+    Event(EventDraft),
+    Place(PlaceDraft),
+}
+
+/// Family draft — father/mother referenced by Gramps ID (the visible
+/// `I####` strings), resolved to handles on save. Rel type is
+/// numeric (`FamilyRelType`: 0 married / 1 unmarried / 2 civil union /
+/// 3 unknown / 4 custom).
+#[derive(Debug, Clone, Default)]
+pub struct FamilyDraft {
+    pub father_gid: String,
+    pub mother_gid: String,
+    pub type_value_s: String,
+}
+
+/// Event draft — type value, description, place by Gramps ID, and
+/// an inline Date draft.
+#[derive(Debug, Clone, Default)]
+pub struct EventDraft {
+    pub type_value_s: String,
+    pub description: String,
+    pub place_gid: String,
+    pub date: crate::views::widgets::date_edit::DateDraft,
+}
+
+/// Place draft — name, type value, lat/long, parent place by Gramps ID.
+#[derive(Debug, Clone, Default)]
+pub struct PlaceDraft {
+    pub name: String,
+    pub type_value_s: String,
+    pub lat: String,
+    pub long: String,
+    pub parent_gid: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -257,6 +291,26 @@ pub enum Message {
     /// User toggled "also delete this person's exclusive events" on
     /// the cascade confirmation banner.
     ToggleDeleteOwnedEvents,
+
+    EditFamilyFather(String),
+    EditFamilyMother(String),
+    EditFamilyType(String),
+
+    EditEventType(String),
+    EditEventDescription(String),
+    EditEventPlace(String),
+    EditEventDateYear(String),
+    EditEventDateMonth(String),
+    EditEventDateDay(String),
+    EditEventDateModifier(String),
+    EditEventDateQuality(String),
+    EditEventDateText(String),
+
+    EditPlaceName(String),
+    EditPlaceType(String),
+    EditPlaceLat(String),
+    EditPlaceLong(String),
+    EditPlaceParent(String),
 }
 
 /// Package returned by the async open-db task: both the persistent
@@ -609,6 +663,111 @@ impl App {
                 }
                 Task::none()
             }
+
+            Message::EditFamilyFather(v) => {
+                if let Some(EditDraft::Family(d)) = self.draft_mut() {
+                    d.father_gid = v;
+                }
+                Task::none()
+            }
+            Message::EditFamilyMother(v) => {
+                if let Some(EditDraft::Family(d)) = self.draft_mut() {
+                    d.mother_gid = v;
+                }
+                Task::none()
+            }
+            Message::EditFamilyType(v) => {
+                if let Some(EditDraft::Family(d)) = self.draft_mut() {
+                    d.type_value_s = v;
+                }
+                Task::none()
+            }
+
+            Message::EditEventType(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.type_value_s = v;
+                }
+                Task::none()
+            }
+            Message::EditEventDescription(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.description = v;
+                }
+                Task::none()
+            }
+            Message::EditEventPlace(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.place_gid = v;
+                }
+                Task::none()
+            }
+            Message::EditEventDateYear(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.date.year_s = v;
+                }
+                Task::none()
+            }
+            Message::EditEventDateMonth(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.date.month_s = v;
+                }
+                Task::none()
+            }
+            Message::EditEventDateDay(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.date.day_s = v;
+                }
+                Task::none()
+            }
+            Message::EditEventDateModifier(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.date.modifier_s = v;
+                }
+                Task::none()
+            }
+            Message::EditEventDateQuality(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.date.quality_s = v;
+                }
+                Task::none()
+            }
+            Message::EditEventDateText(v) => {
+                if let Some(EditDraft::Event(d)) = self.draft_mut() {
+                    d.date.text_s = v;
+                }
+                Task::none()
+            }
+
+            Message::EditPlaceName(v) => {
+                if let Some(EditDraft::Place(d)) = self.draft_mut() {
+                    d.name = v;
+                }
+                Task::none()
+            }
+            Message::EditPlaceType(v) => {
+                if let Some(EditDraft::Place(d)) = self.draft_mut() {
+                    d.type_value_s = v;
+                }
+                Task::none()
+            }
+            Message::EditPlaceLat(v) => {
+                if let Some(EditDraft::Place(d)) = self.draft_mut() {
+                    d.lat = v;
+                }
+                Task::none()
+            }
+            Message::EditPlaceLong(v) => {
+                if let Some(EditDraft::Place(d)) = self.draft_mut() {
+                    d.long = v;
+                }
+                Task::none()
+            }
+            Message::EditPlaceParent(v) => {
+                if let Some(EditDraft::Place(d)) = self.draft_mut() {
+                    d.parent_gid = v;
+                }
+                Task::none()
+            }
         }
     }
 
@@ -677,6 +836,75 @@ impl App {
                         name: tag.name.clone(),
                         color: tag.color.clone(),
                         priority_s: tag.priority.to_string(),
+                    }),
+                })
+            }
+            View::Families => {
+                let idx = self.families.selected_item()?;
+                let fam = snap.families.get(idx)?;
+                let father_gid = fam
+                    .father_handle
+                    .as_ref()
+                    .and_then(|h| snap.person(h))
+                    .map(|p| p.gramps_id.clone())
+                    .unwrap_or_default();
+                let mother_gid = fam
+                    .mother_handle
+                    .as_ref()
+                    .and_then(|h| snap.person(h))
+                    .map(|p| p.gramps_id.clone())
+                    .unwrap_or_default();
+                Some(EditSession {
+                    handle: Some(fam.handle.clone()),
+                    draft: EditDraft::Family(FamilyDraft {
+                        father_gid,
+                        mother_gid,
+                        type_value_s: fam.r#type.value.to_string(),
+                    }),
+                })
+            }
+            View::Events => {
+                let idx = self.events.selected_item()?;
+                let ev = snap.events.get(idx)?;
+                let place_gid = snap
+                    .place(&ev.place)
+                    .map(|p| p.gramps_id.clone())
+                    .unwrap_or_default();
+                Some(EditSession {
+                    handle: Some(ev.handle.clone()),
+                    draft: EditDraft::Event(EventDraft {
+                        type_value_s: ev.r#type.value.to_string(),
+                        description: ev.description.clone(),
+                        place_gid,
+                        date: ev
+                            .date
+                            .as_ref()
+                            .map(crate::views::widgets::date_edit::DateDraft::from_date)
+                            .unwrap_or_default(),
+                    }),
+                })
+            }
+            View::Places => {
+                let idx = self.places.selected_item()?;
+                let p = snap.places.get(idx)?;
+                let parent_gid = p
+                    .placeref_list
+                    .first()
+                    .and_then(|pr| snap.place(&pr.r#ref))
+                    .map(|pp| pp.gramps_id.clone())
+                    .unwrap_or_default();
+                Some(EditSession {
+                    handle: Some(p.handle.clone()),
+                    draft: EditDraft::Place(PlaceDraft {
+                        name: if p.name.value.is_empty() {
+                            p.title.clone()
+                        } else {
+                            p.name.value.clone()
+                        },
+                        type_value_s: p.place_type.value.to_string(),
+                        lat: p.lat.clone(),
+                        long: p.long.clone(),
+                        parent_gid,
                     }),
                 })
             }
@@ -829,6 +1057,11 @@ impl App {
             let creating = session.handle.is_none();
             match (&session.draft, self.current) {
                 (EditDraft::Person(d), View::Persons) => return person::edit_view(d, creating),
+                (EditDraft::Family(d), View::Families) => {
+                    return family::edit_view(d, creating)
+                }
+                (EditDraft::Event(d), View::Events) => return event::edit_view(d, creating),
+                (EditDraft::Place(d), View::Places) => return place::edit_view(d, creating),
                 (EditDraft::Tag(d), View::Tags) => return tag::edit_view(d, creating),
                 (EditDraft::Note(d), View::Notes) => return note::edit_view(d, creating),
                 (EditDraft::Repository(d), View::Repositories) => {
@@ -939,7 +1172,13 @@ impl App {
     fn action_bar<'a>(&'a self) -> Element<'a, Message> {
         let editable = matches!(
             self.current,
-            View::Persons | View::Tags | View::Notes | View::Repositories
+            View::Persons
+                | View::Families
+                | View::Events
+                | View::Places
+                | View::Tags
+                | View::Notes
+                | View::Repositories
         );
         let has_selection = self.current_selected_handle().is_some();
 
@@ -1080,6 +1319,18 @@ impl App {
                 let i = self.persons.selected_item()?;
                 Some(snap.persons.get(i)?.handle.clone())
             }
+            View::Families => {
+                let i = self.families.selected_item()?;
+                Some(snap.families.get(i)?.handle.clone())
+            }
+            View::Events => {
+                let i = self.events.selected_item()?;
+                Some(snap.events.get(i)?.handle.clone())
+            }
+            View::Places => {
+                let i = self.places.selected_item()?;
+                Some(snap.places.get(i)?.handle.clone())
+            }
             View::Tags => {
                 let i = self.tags.selected_item()?;
                 Some(snap.tags.get(i)?.handle.clone())
@@ -1200,6 +1451,55 @@ impl App {
 /// inline confirmation banners without eating the whole row.
 fn short(handle: &str) -> String {
     handle.chars().take(8).collect()
+}
+
+/// Resolve a `gramps_id` like "I0003" to a Person handle. Empty or
+/// blank input returns `Ok(None)` — meaning "this field is unset".
+/// A non-blank input that doesn't match any row is an error so the
+/// user sees a "no such person" message instead of silent data loss.
+fn resolve_person_by_gid(
+    conn: &rusqlite::Connection,
+    gid: &str,
+) -> anyhow::Result<Option<String>> {
+    let gid = gid.trim();
+    if gid.is_empty() {
+        return Ok(None);
+    }
+    let row: Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT handle FROM person WHERE gramps_id = ?1",
+        rusqlite::params![gid],
+        |r| r.get(0),
+    );
+    match row {
+        Ok(h) => Ok(Some(h)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(anyhow::anyhow!("no person with gramps_id {gid}"))
+        }
+        Err(e) => Err(anyhow::anyhow!("lookup person {gid}: {e}")),
+    }
+}
+
+/// Same as [`resolve_person_by_gid`] for Place.
+fn resolve_place_by_gid(
+    conn: &rusqlite::Connection,
+    gid: &str,
+) -> anyhow::Result<Option<String>> {
+    let gid = gid.trim();
+    if gid.is_empty() {
+        return Ok(None);
+    }
+    let row: Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT handle FROM place WHERE gramps_id = ?1",
+        rusqlite::params![gid],
+        |r| r.get(0),
+    );
+    match row {
+        Ok(h) => Ok(Some(h)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(anyhow::anyhow!("no place with gramps_id {gid}"))
+        }
+        Err(e) => Err(anyhow::anyhow!("lookup place {gid}: {e}")),
+    }
 }
 
 fn global_key(key: Key, modifiers: Modifiers) -> Option<Message> {
@@ -1361,6 +1661,75 @@ async fn save_async(db: Arc<Database>, session: EditSession) -> Result<Snapshot,
                 }
                 Ok(())
             }
+            EditDraft::Family(draft) => {
+                let type_value = draft.type_value_s.parse().unwrap_or(0);
+                let father = resolve_person_by_gid(txn, &draft.father_gid)?;
+                let mother = resolve_person_by_gid(txn, &draft.mother_gid)?;
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::family::update(txn, &h, father, mother, type_value)?;
+                    }
+                    None => {
+                        dbrepo::family::create(txn, father, mother, type_value)?;
+                    }
+                }
+                Ok(())
+            }
+            EditDraft::Event(draft) => {
+                let type_value = draft.type_value_s.parse().unwrap_or(0);
+                let place = resolve_place_by_gid(txn, &draft.place_gid)?;
+                let date = draft.date.to_date();
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::event::update_full(
+                            txn,
+                            &h,
+                            type_value,
+                            &draft.description,
+                            place,
+                            date,
+                        )?;
+                    }
+                    None => {
+                        dbrepo::event::create_full(
+                            txn,
+                            type_value,
+                            &draft.description,
+                            place,
+                            date,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            EditDraft::Place(draft) => {
+                let type_value = draft.type_value_s.parse().unwrap_or(0);
+                let parent = resolve_place_by_gid(txn, &draft.parent_gid)?;
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::place::update(
+                            txn,
+                            &h,
+                            &draft.name,
+                            type_value,
+                            &draft.lat,
+                            &draft.long,
+                            parent,
+                        )?;
+                    }
+                    None => {
+                        dbrepo::place::create(
+                            txn,
+                            &draft.name,
+                            type_value,
+                            &draft.lat,
+                            &draft.long,
+                            parent,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
         })?;
         db.snapshot()
     })
@@ -1388,6 +1757,9 @@ async fn delete_async(
             View::Persons => {
                 dbrepo::person::delete_with_cascade(txn, &handle, delete_owned_events)
             }
+            View::Families => dbrepo::family::delete_with_cascade(txn, &handle),
+            View::Events => dbrepo::event::delete(txn, &handle),
+            View::Places => dbrepo::place::delete_with_cascade(txn, &handle),
             View::Tags => dbrepo::tag::delete(txn, &handle),
             View::Notes => dbrepo::note::delete(txn, &handle),
             View::Repositories => dbrepo::repository::delete(txn, &handle),
@@ -1415,6 +1787,31 @@ fn default_draft_for(view: View) -> EditDraft {
             gender_s: "2".to_string(),
             birth_year_s: String::new(),
             death_year_s: String::new(),
+        }),
+        View::Families => EditDraft::Family(FamilyDraft {
+            father_gid: String::new(),
+            mother_gid: String::new(),
+            // FamilyRelType::Married = 0
+            type_value_s: "0".to_string(),
+        }),
+        View::Events => EditDraft::Event(EventDraft {
+            // EventType::Custom = 0
+            type_value_s: "1".to_string(),
+            description: String::new(),
+            place_gid: String::new(),
+            date: crate::views::widgets::date_edit::DateDraft {
+                modifier_s: "0".to_string(),
+                quality_s: "0".to_string(),
+                ..Default::default()
+            },
+        }),
+        View::Places => EditDraft::Place(PlaceDraft {
+            name: String::new(),
+            // PlaceType::City = 4
+            type_value_s: "4".to_string(),
+            lat: String::new(),
+            long: String::new(),
+            parent_gid: String::new(),
         }),
         View::Tags => EditDraft::Tag(TagDraft {
             name: "New tag".to_string(),

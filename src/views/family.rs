@@ -2,14 +2,14 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, section};
 use super::list_pane::{self, ListState};
 use super::person;
 use super::widgets::date_display;
-use crate::app::Message;
+use crate::app::{FamilyDraft, Message};
 use crate::db::Snapshot;
 use crate::gramps::enums::{child_ref_label, event_type_label, family_rel_label};
 use crate::gramps::{Family, Person};
@@ -164,4 +164,51 @@ fn events_block<'a>(fam: &'a Family, snap: &'a Snapshot) -> Element<'a, Message>
 #[allow(dead_code)]
 pub fn _family_cmp(a: &Family, b: &Family) -> Ordering {
     a.gramps_id.cmp(&b.gramps_id)
+}
+
+/// Edit-form view for a Family.
+///
+/// Phase 6a exposes father + mother (referenced by Gramps ID like
+/// `I0003`) plus the FamilyRelType value. Child list editing still
+/// happens from the Person side via the person's own edit form
+/// (create a person → set parent_family_list → cascade updates the
+/// family's child_ref_list) — a child-editor widget will come in
+/// Phase 7 alongside the "reparent" workflow.
+pub fn edit_view<'a>(draft: &'a FamilyDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New family" } else { "Edit family" }).size(24);
+    let label_color = iced::Color::from_rgb(0.5, 0.5, 0.5);
+    let label = |s: &'static str| text(s).size(11).color(label_color);
+
+    let father_field = column![
+        label("Father — Gramps ID (e.g. I0003), blank for none"),
+        text_input("I####", &draft.father_gid)
+            .on_input(Message::EditFamilyFather)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let mother_field = column![
+        label("Mother — Gramps ID"),
+        text_input("I####", &draft.mother_gid)
+            .on_input(Message::EditFamilyMother)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let type_field = column![
+        label("Type  (0 married · 1 unmarried · 2 civil union · 3 unknown)"),
+        text_input("0", &draft.type_value_s)
+            .on_input(Message::EditFamilyType)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body = column![title, father_field, mother_field, type_field]
+        .spacing(14)
+        .padding(24)
+        .align_x(Alignment::Start);
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

@@ -1,9 +1,10 @@
-//! Minimal Event CRUD — just enough for Person to attach birth /
-//! death events.
+//! Event CRUD — Phase 5 shipped `create_date_only` for Person's
+//! birth/death path; Phase 6a adds `create_full` and `update_full`
+//! with type / description / place / full Date support.
 //!
-//! Phase 5 only creates date-only events (no place, no participants
-//! beyond the creating person). Phase 6a will grow this with full
-//! place/participant/attribute editing and the shared Date widget.
+//! Delete is still refuse-on-use (inbound_ref_count > 0 → bail).
+//! Users who want to delete a linked event should unlink it from
+//! the referencing Person or Family first.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Transaction};
@@ -181,4 +182,95 @@ fn year_only_date(year: i32) -> Date {
         format: None,
         year: Some(year),
     }
+}
+
+/// Create an Event with type, description, optional place handle,
+/// and an optional full Date. Used by the Phase 6a Event UI.
+pub fn create_full(
+    txn: &Transaction,
+    type_value: i32,
+    description: &str,
+    place_handle: Option<String>,
+    date: Option<Date>,
+) -> Result<Event> {
+    let event = Event {
+        class: Some("Event".to_string()),
+        handle: new_handle(),
+        gramps_id: next_gramps_id(txn, "event", 'E')?,
+        change: now_unix(),
+        private: false,
+        r#type: Typed {
+            class: Some("EventType".to_string()),
+            value: type_value,
+            string: String::new(),
+        },
+        description: description.to_string(),
+        place: place_handle.unwrap_or_default(),
+        date,
+        citation_list: Vec::new(),
+        note_list: Vec::new(),
+        media_list: Vec::new(),
+        attribute_list: Vec::new(),
+        tag_list: Vec::new(),
+    };
+    insert(txn, &event)?;
+    tracing::info!(handle = %event.handle, gramps_id = %event.gramps_id, "created event (full)");
+    Ok(event)
+}
+
+/// Clear the `place` field on an event. Used by Phase 6a Place
+/// delete cascade when the deleted place is currently linked from
+/// one or more events — we null out the link rather than refuse the
+/// delete.
+pub(super) fn clear_place(txn: &Transaction, handle: &str) -> Result<()> {
+    let existing_json: String = match txn.query_row(
+        "SELECT json_data FROM event WHERE handle = ?1",
+        params![handle],
+        |r| r.get(0),
+    ) {
+        Ok(j) => j,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+        Err(e) => return Err(anyhow::anyhow!("load event {handle}: {e}")),
+    };
+    let mut event: Event =
+        serde_json::from_str(&existing_json).context("parse event")?;
+    if event.place.is_empty() {
+        return Ok(());
+    }
+    event.place.clear();
+    event.change = now_unix();
+    update_row(txn, &event)?;
+    Ok(())
+}
+
+/// Update the editable subset of an existing event: type, description,
+/// place link, date. Preserves cross-ref lists and tags.
+pub fn update_full(
+    txn: &Transaction,
+    handle: &str,
+    type_value: i32,
+    description: &str,
+    place_handle: Option<String>,
+    date: Option<Date>,
+) -> Result<Event> {
+    let existing_json: String = txn
+        .query_row(
+            "SELECT json_data FROM event WHERE handle = ?1",
+            params![handle],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("load event {handle}"))?;
+    let mut event: Event =
+        serde_json::from_str(&existing_json).context("parse existing event")?;
+
+    event.r#type.value = type_value;
+    event.r#type.string = String::new();
+    event.description = description.to_string();
+    event.place = place_handle.unwrap_or_default();
+    event.date = date;
+    event.change = now_unix();
+
+    update_row(txn, &event)?;
+    tracing::info!(handle = %event.handle, "updated event (full)");
+    Ok(event)
 }

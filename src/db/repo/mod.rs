@@ -18,5 +18,6 @@ pub mod event;
 pub mod family;
 pub mod note;
 pub mod person;
+pub mod place;
 pub mod repository;
 pub mod tag;

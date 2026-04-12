@@ -10,12 +10,12 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
-use crate::app::Message;
+use crate::app::{Message, PlaceDraft};
 use crate::db::Snapshot;
 use crate::gramps::enums::place_type_label;
 use crate::gramps::Place;
@@ -195,4 +195,67 @@ fn events_here_block<'a>(place: &'a Place, snap: &'a Snapshot) -> Element<'a, Me
         return text("(none)").size(13).into();
     }
     col.into()
+}
+
+/// Edit-form view for a Place. Parent is referenced by Gramps ID.
+/// The type value is numeric (see `gramps::enums::place_type_label`).
+/// Only the primary PlaceName slot (index 0) is editable for now.
+pub fn edit_view<'a>(draft: &'a PlaceDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New place" } else { "Edit place" }).size(24);
+    let label_color = iced::Color::from_rgb(0.5, 0.5, 0.5);
+    let label = |s: &'static str| text(s).size(11).color(label_color);
+
+    let name_field = column![
+        label("Name"),
+        text_input("City name", &draft.name)
+            .on_input(Message::EditPlaceName)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let type_field = column![
+        label("Type value (1=Country · 2=State · 4=City · 15=Town · 16=Village · …)"),
+        text_input("4", &draft.type_value_s)
+            .on_input(Message::EditPlaceType)
+            .padding(6)
+            .width(Length::Fixed(90.0)),
+    ]
+    .spacing(4);
+
+    let coords = row![
+        column![
+            label("Latitude"),
+            text_input("38.8838856", &draft.lat)
+                .on_input(Message::EditPlaceLat)
+                .padding(6)
+                .width(Length::Fixed(140.0)),
+        ]
+        .spacing(4),
+        column![
+            label("Longitude"),
+            text_input("-94.8188700", &draft.long)
+                .on_input(Message::EditPlaceLong)
+                .padding(6)
+                .width(Length::Fixed(140.0)),
+        ]
+        .spacing(4),
+    ]
+    .spacing(10);
+
+    let parent_field = column![
+        label("Parent place — Gramps ID (e.g. P0002), blank for top-level"),
+        text_input("P####", &draft.parent_gid)
+            .on_input(Message::EditPlaceParent)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body = column![title, name_field, type_field, coords, parent_field]
+        .spacing(14)
+        .padding(24)
+        .align_x(Alignment::Start);
+    container(scrollable(body))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

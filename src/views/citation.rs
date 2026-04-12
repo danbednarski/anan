@@ -2,13 +2,13 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
-use super::widgets::date_display;
-use crate::app::Message;
+use super::widgets::{date_display, date_edit::{self, DateMessages}};
+use crate::app::{CitationDraft, Message};
 use crate::db::Snapshot;
 use crate::gramps::Citation;
 
@@ -105,6 +105,59 @@ pub fn detail_view<'a>(snap: &'a Snapshot, cit: &'a Citation) -> Element<'a, Mes
 
     let body = column![title, meta, vitals, page_block]
         .spacing(18)
+        .padding(24)
+        .align_x(Alignment::Start);
+
+    container(scrollable(body))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+pub fn edit_view<'a>(draft: &'a CitationDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New citation" } else { "Edit citation" }).size(24);
+    let label_color = iced::Color::from_rgb(0.5, 0.5, 0.5);
+    let label = |s: &'static str| text(s).size(11).color(label_color);
+
+    let source_field = column![
+        label("Source - Gramps ID (e.g. S0001)"),
+        text_input("S####", &draft.source_gid)
+            .on_input(Message::EditCitationSource)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let page_field = column![
+        label("Page / URL"),
+        text_input("e.g. p. 42 or https://...", &draft.page)
+            .on_input(Message::EditCitationPage)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let confidence_field = column![
+        label("Confidence (0 very low .. 4 very high)"),
+        text_input("2", &draft.confidence_s)
+            .on_input(Message::EditCitationConfidence)
+            .padding(6)
+            .width(Length::Fixed(60.0)),
+    ]
+    .spacing(4);
+
+    let date_widget = date_edit::view(
+        &draft.date,
+        &DateMessages {
+            on_year: Message::EditCitationDateYear,
+            on_month: Message::EditCitationDateMonth,
+            on_day: Message::EditCitationDateDay,
+            on_modifier: Message::EditCitationDateModifier,
+            on_quality: Message::EditCitationDateQuality,
+            on_text: Message::EditCitationDateText,
+        },
+    );
+
+    let body = column![title, source_field, page_field, confidence_field, date_widget]
+        .spacing(14)
         .padding(24)
         .align_x(Alignment::Start);
 

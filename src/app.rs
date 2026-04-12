@@ -142,6 +142,9 @@ pub enum EditDraft {
     Family(FamilyDraft),
     Event(EventDraft),
     Place(PlaceDraft),
+    Source(SourceDraft),
+    Citation(CitationDraft),
+    Media(MediaDraft),
 }
 
 /// Family draft — father/mother referenced by Gramps ID (the visible
@@ -173,6 +176,34 @@ pub struct PlaceDraft {
     pub lat: String,
     pub long: String,
     pub parent_gid: String,
+}
+
+/// Source draft — title, author, pubinfo, abbrev.
+#[derive(Debug, Clone, Default)]
+pub struct SourceDraft {
+    pub title: String,
+    pub author: String,
+    pub pubinfo: String,
+    pub abbrev: String,
+}
+
+/// Citation draft — source by Gramps ID, page / URL, confidence
+/// 0..4, and an inline date draft.
+#[derive(Debug, Clone, Default)]
+pub struct CitationDraft {
+    pub source_gid: String,
+    pub page: String,
+    pub confidence_s: String,
+    pub date: crate::views::widgets::date_edit::DateDraft,
+}
+
+/// Media draft — path, mime, description, optional date.
+#[derive(Debug, Clone, Default)]
+pub struct MediaDraft {
+    pub path: String,
+    pub mime: String,
+    pub desc: String,
+    pub date: crate::views::widgets::date_edit::DateDraft,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -311,6 +342,31 @@ pub enum Message {
     EditPlaceLat(String),
     EditPlaceLong(String),
     EditPlaceParent(String),
+
+    EditSourceTitle(String),
+    EditSourceAuthor(String),
+    EditSourcePubinfo(String),
+    EditSourceAbbrev(String),
+
+    EditCitationSource(String),
+    EditCitationPage(String),
+    EditCitationConfidence(String),
+    EditCitationDateYear(String),
+    EditCitationDateMonth(String),
+    EditCitationDateDay(String),
+    EditCitationDateModifier(String),
+    EditCitationDateQuality(String),
+    EditCitationDateText(String),
+
+    EditMediaPath(String),
+    EditMediaMime(String),
+    EditMediaDesc(String),
+    EditMediaDateYear(String),
+    EditMediaDateMonth(String),
+    EditMediaDateDay(String),
+    EditMediaDateModifier(String),
+    EditMediaDateQuality(String),
+    EditMediaDateText(String),
 }
 
 /// Package returned by the async open-db task: both the persistent
@@ -768,6 +824,141 @@ impl App {
                 }
                 Task::none()
             }
+
+            Message::EditSourceTitle(v) => {
+                if let Some(EditDraft::Source(d)) = self.draft_mut() {
+                    d.title = v;
+                }
+                Task::none()
+            }
+            Message::EditSourceAuthor(v) => {
+                if let Some(EditDraft::Source(d)) = self.draft_mut() {
+                    d.author = v;
+                }
+                Task::none()
+            }
+            Message::EditSourcePubinfo(v) => {
+                if let Some(EditDraft::Source(d)) = self.draft_mut() {
+                    d.pubinfo = v;
+                }
+                Task::none()
+            }
+            Message::EditSourceAbbrev(v) => {
+                if let Some(EditDraft::Source(d)) = self.draft_mut() {
+                    d.abbrev = v;
+                }
+                Task::none()
+            }
+
+            Message::EditCitationSource(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.source_gid = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationPage(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.page = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationConfidence(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.confidence_s = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationDateYear(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.date.year_s = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationDateMonth(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.date.month_s = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationDateDay(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.date.day_s = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationDateModifier(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.date.modifier_s = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationDateQuality(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.date.quality_s = v;
+                }
+                Task::none()
+            }
+            Message::EditCitationDateText(v) => {
+                if let Some(EditDraft::Citation(d)) = self.draft_mut() {
+                    d.date.text_s = v;
+                }
+                Task::none()
+            }
+
+            Message::EditMediaPath(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.path = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaMime(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.mime = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaDesc(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.desc = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaDateYear(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.date.year_s = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaDateMonth(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.date.month_s = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaDateDay(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.date.day_s = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaDateModifier(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.date.modifier_s = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaDateQuality(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.date.quality_s = v;
+                }
+                Task::none()
+            }
+            Message::EditMediaDateText(v) => {
+                if let Some(EditDraft::Media(d)) = self.draft_mut() {
+                    d.date.text_s = v;
+                }
+                Task::none()
+            }
         }
     }
 
@@ -877,6 +1068,57 @@ impl App {
                         description: ev.description.clone(),
                         place_gid,
                         date: ev
+                            .date
+                            .as_ref()
+                            .map(crate::views::widgets::date_edit::DateDraft::from_date)
+                            .unwrap_or_default(),
+                    }),
+                })
+            }
+            View::Sources => {
+                let idx = self.sources.selected_item()?;
+                let s = snap.sources.get(idx)?;
+                Some(EditSession {
+                    handle: Some(s.handle.clone()),
+                    draft: EditDraft::Source(SourceDraft {
+                        title: s.title.clone(),
+                        author: s.author.clone(),
+                        pubinfo: s.pubinfo.clone(),
+                        abbrev: s.abbrev.clone(),
+                    }),
+                })
+            }
+            View::Citations => {
+                let idx = self.citations.selected_item()?;
+                let c = snap.citations.get(idx)?;
+                let source_gid = snap
+                    .source(&c.source_handle)
+                    .map(|s| s.gramps_id.clone())
+                    .unwrap_or_default();
+                Some(EditSession {
+                    handle: Some(c.handle.clone()),
+                    draft: EditDraft::Citation(CitationDraft {
+                        source_gid,
+                        page: c.page.clone(),
+                        confidence_s: c.confidence.to_string(),
+                        date: c
+                            .date
+                            .as_ref()
+                            .map(crate::views::widgets::date_edit::DateDraft::from_date)
+                            .unwrap_or_default(),
+                    }),
+                })
+            }
+            View::Media => {
+                let idx = self.media.selected_item()?;
+                let m = snap.media.get(idx)?;
+                Some(EditSession {
+                    handle: Some(m.handle.clone()),
+                    draft: EditDraft::Media(MediaDraft {
+                        path: m.path.clone(),
+                        mime: m.mime.clone(),
+                        desc: m.desc.clone(),
+                        date: m
                             .date
                             .as_ref()
                             .map(crate::views::widgets::date_edit::DateDraft::from_date)
@@ -1062,6 +1304,11 @@ impl App {
                 }
                 (EditDraft::Event(d), View::Events) => return event::edit_view(d, creating),
                 (EditDraft::Place(d), View::Places) => return place::edit_view(d, creating),
+                (EditDraft::Source(d), View::Sources) => return source::edit_view(d, creating),
+                (EditDraft::Citation(d), View::Citations) => {
+                    return citation::edit_view(d, creating)
+                }
+                (EditDraft::Media(d), View::Media) => return media::edit_view(d, creating),
                 (EditDraft::Tag(d), View::Tags) => return tag::edit_view(d, creating),
                 (EditDraft::Note(d), View::Notes) => return note::edit_view(d, creating),
                 (EditDraft::Repository(d), View::Repositories) => {
@@ -1170,16 +1417,7 @@ impl App {
     /// selected, and whether an edit session / delete confirmation is
     /// active.
     fn action_bar<'a>(&'a self) -> Element<'a, Message> {
-        let editable = matches!(
-            self.current,
-            View::Persons
-                | View::Families
-                | View::Events
-                | View::Places
-                | View::Tags
-                | View::Notes
-                | View::Repositories
-        );
+        let editable = !matches!(self.current, View::Search);
         let has_selection = self.current_selected_handle().is_some();
 
         let mut bar = row![].spacing(8).padding(8).align_y(Alignment::Center);
@@ -1331,6 +1569,18 @@ impl App {
                 let i = self.places.selected_item()?;
                 Some(snap.places.get(i)?.handle.clone())
             }
+            View::Sources => {
+                let i = self.sources.selected_item()?;
+                Some(snap.sources.get(i)?.handle.clone())
+            }
+            View::Citations => {
+                let i = self.citations.selected_item()?;
+                Some(snap.citations.get(i)?.handle.clone())
+            }
+            View::Media => {
+                let i = self.media.selected_item()?;
+                Some(snap.media.get(i)?.handle.clone())
+            }
             View::Tags => {
                 let i = self.tags.selected_item()?;
                 Some(snap.tags.get(i)?.handle.clone())
@@ -1476,6 +1726,29 @@ fn resolve_person_by_gid(
             Err(anyhow::anyhow!("no person with gramps_id {gid}"))
         }
         Err(e) => Err(anyhow::anyhow!("lookup person {gid}: {e}")),
+    }
+}
+
+/// Same as [`resolve_person_by_gid`] for Source.
+fn resolve_source_by_gid(
+    conn: &rusqlite::Connection,
+    gid: &str,
+) -> anyhow::Result<Option<String>> {
+    let gid = gid.trim();
+    if gid.is_empty() {
+        return Ok(None);
+    }
+    let row: Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT handle FROM source WHERE gramps_id = ?1",
+        rusqlite::params![gid],
+        |r| r.get(0),
+    );
+    match row {
+        Ok(h) => Ok(Some(h)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(anyhow::anyhow!("no source with gramps_id {gid}"))
+        }
+        Err(e) => Err(anyhow::anyhow!("lookup source {gid}: {e}")),
     }
 }
 
@@ -1730,6 +2003,84 @@ async fn save_async(db: Arc<Database>, session: EditSession) -> Result<Snapshot,
                 }
                 Ok(())
             }
+            EditDraft::Source(draft) => {
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::source::update(
+                            txn,
+                            &h,
+                            &draft.title,
+                            &draft.author,
+                            &draft.pubinfo,
+                            &draft.abbrev,
+                        )?;
+                    }
+                    None => {
+                        dbrepo::source::create(
+                            txn,
+                            &draft.title,
+                            &draft.author,
+                            &draft.pubinfo,
+                            &draft.abbrev,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            EditDraft::Citation(draft) => {
+                let confidence = draft.confidence_s.parse().unwrap_or(2);
+                let source_handle =
+                    resolve_source_by_gid(txn, &draft.source_gid)?
+                        .unwrap_or_default();
+                let date = draft.date.to_date();
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::citation::update(
+                            txn,
+                            &h,
+                            &source_handle,
+                            &draft.page,
+                            confidence,
+                            date,
+                        )?;
+                    }
+                    None => {
+                        dbrepo::citation::create(
+                            txn,
+                            &source_handle,
+                            &draft.page,
+                            confidence,
+                            date,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            EditDraft::Media(draft) => {
+                let date = draft.date.to_date();
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::media::update(
+                            txn,
+                            &h,
+                            &draft.path,
+                            &draft.mime,
+                            &draft.desc,
+                            date,
+                        )?;
+                    }
+                    None => {
+                        dbrepo::media::create(
+                            txn,
+                            &draft.path,
+                            &draft.mime,
+                            &draft.desc,
+                            date,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
         })?;
         db.snapshot()
     })
@@ -1760,6 +2111,9 @@ async fn delete_async(
             View::Families => dbrepo::family::delete_with_cascade(txn, &handle),
             View::Events => dbrepo::event::delete(txn, &handle),
             View::Places => dbrepo::place::delete_with_cascade(txn, &handle),
+            View::Sources => dbrepo::source::delete(txn, &handle),
+            View::Citations => dbrepo::citation::delete(txn, &handle),
+            View::Media => dbrepo::media::delete(txn, &handle),
             View::Tags => dbrepo::tag::delete(txn, &handle),
             View::Notes => dbrepo::note::delete(txn, &handle),
             View::Repositories => dbrepo::repository::delete(txn, &handle),
@@ -1813,6 +2167,12 @@ fn default_draft_for(view: View) -> EditDraft {
             long: String::new(),
             parent_gid: String::new(),
         }),
+        View::Sources => EditDraft::Source(SourceDraft::default()),
+        View::Citations => EditDraft::Citation(CitationDraft {
+            confidence_s: "2".to_string(),
+            ..Default::default()
+        }),
+        View::Media => EditDraft::Media(MediaDraft::default()),
         View::Tags => EditDraft::Tag(TagDraft {
             name: "New tag".to_string(),
             color: "#888888".to_string(),

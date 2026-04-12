@@ -2,12 +2,12 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
-use crate::app::Message;
+use crate::app::{Message, SourceDraft};
 use crate::db::Snapshot;
 use crate::gramps::Source;
 
@@ -137,4 +137,48 @@ fn repositories_block<'a>(src: &'a Source, snap: &'a Snapshot) -> Element<'a, Me
         col = col.push(text(format!("{name}{call}")).size(13));
     }
     col.into()
+}
+
+pub fn edit_view<'a>(draft: &'a SourceDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New source" } else { "Edit source" }).size(24);
+    let label_color = iced::Color::from_rgb(0.5, 0.5, 0.5);
+    let label = |s: &'static str| text(s).size(11).color(label_color);
+
+    let title_field = column![
+        label("Title"),
+        text_input("Source title", &draft.title)
+            .on_input(Message::EditSourceTitle)
+            .padding(6),
+    ]
+    .spacing(4);
+    let author_field = column![
+        label("Author"),
+        text_input("Author name", &draft.author)
+            .on_input(Message::EditSourceAuthor)
+            .padding(6),
+    ]
+    .spacing(4);
+    let pubinfo_field = column![
+        label("Publication info"),
+        text_input("Publisher, year, etc.", &draft.pubinfo)
+            .on_input(Message::EditSourcePubinfo)
+            .padding(6),
+    ]
+    .spacing(4);
+    let abbrev_field = column![
+        label("Abbreviation"),
+        text_input("Short label", &draft.abbrev)
+            .on_input(Message::EditSourceAbbrev)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body = column![title, title_field, author_field, pubinfo_field, abbrev_field]
+        .spacing(14)
+        .padding(24)
+        .align_x(Alignment::Start);
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

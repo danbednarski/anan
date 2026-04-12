@@ -12,13 +12,13 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
-use super::widgets::date_display;
-use crate::app::Message;
+use super::widgets::{date_display, date_edit::{self, DateMessages}};
+use crate::app::{MediaDraft, Message};
 use crate::db::Snapshot;
 use crate::gramps::Media;
 
@@ -91,6 +91,59 @@ pub fn detail_view<'a>(_snap: &'a Snapshot, m: &'a Media) -> Element<'a, Message
 
     let body = column![title, meta, vitals, checksum_block]
         .spacing(18)
+        .padding(24)
+        .align_x(Alignment::Start);
+
+    container(scrollable(body))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+pub fn edit_view<'a>(draft: &'a MediaDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New media" } else { "Edit media" }).size(24);
+    let label_color = iced::Color::from_rgb(0.5, 0.5, 0.5);
+    let label = |s: &'static str| text(s).size(11).color(label_color);
+
+    let path_field = column![
+        label("File path"),
+        text_input("/path/to/file.jpg", &draft.path)
+            .on_input(Message::EditMediaPath)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let mime_field = column![
+        label("MIME type"),
+        text_input("image/jpeg", &draft.mime)
+            .on_input(Message::EditMediaMime)
+            .padding(6)
+            .width(Length::Fixed(180.0)),
+    ]
+    .spacing(4);
+
+    let desc_field = column![
+        label("Description"),
+        text_input("Photo description", &draft.desc)
+            .on_input(Message::EditMediaDesc)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let date_widget = date_edit::view(
+        &draft.date,
+        &DateMessages {
+            on_year: Message::EditMediaDateYear,
+            on_month: Message::EditMediaDateMonth,
+            on_day: Message::EditMediaDateDay,
+            on_modifier: Message::EditMediaDateModifier,
+            on_quality: Message::EditMediaDateQuality,
+            on_text: Message::EditMediaDateText,
+        },
+    );
+
+    let body = column![title, path_field, mime_field, desc_field, date_widget]
+        .spacing(14)
         .padding(24)
         .align_x(Alignment::Start);
 

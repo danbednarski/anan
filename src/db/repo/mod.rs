@@ -13,11 +13,14 @@
 //! Write helpers also refresh the `reference` denormalization table
 //! and bump the `change` column to the current unix time.
 
+pub mod citation;
 pub mod common;
 pub mod event;
 pub mod family;
+pub mod media;
 pub mod note;
 pub mod person;
 pub mod place;
 pub mod repository;
+pub mod source;
 pub mod tag;

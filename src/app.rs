@@ -34,8 +34,8 @@ use crate::db::{repo as dbrepo, Database, Snapshot};
 use crate::views::list_pane::ListState;
 use crate::views::search::{SearchHit, SearchState};
 use crate::views::{
-    citation, detail_ui, event, family, media, network, note, person, place, repository, search,
-    source, tag, tree,
+    canvas_tree, citation, detail_ui, event, family, media, network, note, person, place,
+    repository, search, source, tag, tree,
 };
 
 /// Stable id for the search `text_input` so ⌘F can focus it.
@@ -1486,7 +1486,19 @@ impl App {
                     Some(h) => match (self.current, self.list_mode) {
                         (View::Tree, false) => tree::view(snap, h, None),
                         (View::Tree, true) => tree::list_view(snap, h),
-                        (View::Network, false) => network::tree_view(snap, h, None),
+                        (View::Network, false) => {
+                            // Canvas-based tree with curved Bezier lines.
+                            let canvas_el = canvas_tree::view(snap, h);
+                            // Wrap in scrollable for pan/scroll.
+                            scrollable(canvas_el)
+                                .direction(iced::widget::scrollable::Direction::Both {
+                                    horizontal: iced::widget::scrollable::Scrollbar::default(),
+                                    vertical: iced::widget::scrollable::Scrollbar::default(),
+                                })
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                                .into()
+                        }
                         (View::Network, true) => network::view(snap, h),
                         _ => detail_ui::empty(""),
                     }

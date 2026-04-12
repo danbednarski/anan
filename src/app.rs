@@ -35,7 +35,7 @@ use crate::views::list_pane::ListState;
 use crate::views::search::{SearchHit, SearchState};
 use crate::views::{
     citation, detail_ui, event, family, media, note, person, place, repository, search, source,
-    tag,
+    tag, tree,
 };
 
 /// Stable id for the search `text_input` so ⌘F can focus it.
@@ -45,6 +45,7 @@ pub const SEARCH_INPUT_ID: &str = "search-input";
 /// columns. Order matches the sidebar navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
+    Tree,
     Persons,
     Families,
     Events,
@@ -60,6 +61,7 @@ pub enum View {
 
 impl View {
     const NAV_ITEMS: &'static [View] = &[
+        View::Tree,
         View::Persons,
         View::Families,
         View::Events,
@@ -75,6 +77,7 @@ impl View {
 
     fn label(self) -> &'static str {
         match self {
+            View::Tree => "Family Tree",
             View::Persons => "Persons",
             View::Families => "Families",
             View::Events => "Events",
@@ -112,6 +115,11 @@ pub struct App {
     repositories: ListState,
     tags: ListState,
     search: SearchState,
+
+    /// Handle of the person the tree view is centered on. Set to the
+    /// first person in the snapshot on load; user re-homes by clicking
+    /// any person card in the tree.
+    home_person: Option<String>,
 
     /// Active in-place edit session, or `None` when not editing.
     edit: Option<EditSession>,
@@ -288,6 +296,17 @@ pub enum Message {
     /// "Open in its own view" from a Search result row.
     OpenSearchHit(SearchHit),
 
+    // ---- tree view (Phase 7) -------------------------------------------
+    /// Click a person card in the tree → re-home on that person.
+    TreeHome(String),
+    /// Add a child to the current home person.
+    TreeAddChild,
+    /// Add a parent (father if male, mother if female) to the home person.
+    TreeAddFather,
+    TreeAddMother,
+    /// Add a sibling to the home person.
+    TreeAddSibling,
+
     // ---- write / edit flow (Phase 4) -----------------------------------
     /// Start creating a new object in the given view (Tag, Note, Repository).
     StartCreate(View),
@@ -428,7 +447,7 @@ impl App {
             App {
                 db: None,
                 snapshot: None,
-                current: View::Persons,
+                current: View::Tree,
                 persons: ListState::default(),
                 families: ListState::default(),
                 events: ListState::default(),
@@ -440,6 +459,7 @@ impl App {
                 repositories: ListState::default(),
                 tags: ListState::default(),
                 search: SearchState::default(),
+                home_person: None,
                 edit: None,
                 delete_confirm: None,
                 error: None,
@@ -497,6 +517,10 @@ impl App {
                             "loaded snapshot"
                         );
                         self.db = Some(db);
+                        self.home_person = snapshot
+                            .persons
+                            .first()
+                            .map(|p| p.handle.clone());
                         self.snapshot = Some(snapshot);
                         self.edit = None;
                         self.delete_confirm = None;
@@ -541,6 +565,71 @@ impl App {
             Message::OpenSearchHit(hit) => {
                 self.jump_to_hit(hit);
                 Task::none()
+            }
+
+            // ---- tree actions -------------------------------------------
+            Message::TreeHome(handle) => {
+                self.home_person = Some(handle);
+                Task::none()
+            }
+            Message::TreeAddChild => {
+                let (Some(db), Some(home)) =
+                    (self.db.clone(), self.home_person.clone())
+                else {
+                    return Task::none();
+                };
+                let surname = self.home_surname().unwrap_or_default();
+                self.saving = true;
+                Task::perform(
+                    tree_action_async(db, move |txn| {
+                        dbrepo::relationships::add_child(txn, &home, "New", &surname, 2)
+                    }),
+                    |r| Message::WriteCompleted(Box::new(r)),
+                )
+            }
+            Message::TreeAddFather => {
+                let (Some(db), Some(home)) =
+                    (self.db.clone(), self.home_person.clone())
+                else {
+                    return Task::none();
+                };
+                let surname = self.home_surname().unwrap_or_default();
+                self.saving = true;
+                Task::perform(
+                    tree_action_async(db, move |txn| {
+                        dbrepo::relationships::add_parent(txn, &home, "New", &surname, 1)
+                    }),
+                    |r| Message::WriteCompleted(Box::new(r)),
+                )
+            }
+            Message::TreeAddMother => {
+                let (Some(db), Some(home)) =
+                    (self.db.clone(), self.home_person.clone())
+                else {
+                    return Task::none();
+                };
+                self.saving = true;
+                Task::perform(
+                    tree_action_async(db, move |txn| {
+                        dbrepo::relationships::add_parent(txn, &home, "New", "", 0)
+                    }),
+                    |r| Message::WriteCompleted(Box::new(r)),
+                )
+            }
+            Message::TreeAddSibling => {
+                let (Some(db), Some(home)) =
+                    (self.db.clone(), self.home_person.clone())
+                else {
+                    return Task::none();
+                };
+                let surname = self.home_surname().unwrap_or_default();
+                self.saving = true;
+                Task::perform(
+                    tree_action_async(db, move |txn| {
+                        dbrepo::relationships::add_sibling(txn, &home, "New", &surname, 2)
+                    }),
+                    |r| Message::WriteCompleted(Box::new(r)),
+                )
             }
 
             // ---- edit flow -----------------------------------------------
@@ -1188,6 +1277,20 @@ impl App {
         let nav = self.nav_column();
 
         let body: Element<'_, Message> = match &self.snapshot {
+            Some(snap) if self.current == View::Tree => {
+                let tree_body = match &self.home_person {
+                    Some(h) => tree::view(snap, h),
+                    None => detail_ui::empty("No person in tree. Open a DB with people."),
+                };
+                let tree_actions = self.tree_action_bar();
+                let tree_col = column![tree_actions, tree_body]
+                    .width(Length::Fill)
+                    .height(Length::Fill);
+                row![nav, vertical_separator(), tree_col]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            }
             Some(snap) => row![
                 nav,
                 vertical_separator(),
@@ -1269,6 +1372,7 @@ impl App {
 
     fn list_pane<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
         match self.current {
+            View::Tree => detail_ui::empty(""),
             View::Persons => person::list_view(snap, &self.persons),
             View::Families => family::list_view(snap, &self.families),
             View::Events => event::list_view(snap, &self.events),
@@ -1320,6 +1424,7 @@ impl App {
 
         let placeholder = || detail_ui::empty("Select a row to see details");
         match self.current {
+            View::Tree => detail_ui::empty(""),
             View::Persons => match self.persons.selected_item() {
                 Some(i) => snap
                     .persons
@@ -1601,6 +1706,9 @@ impl App {
 
     fn current_list_state_mut(&mut self) -> &mut ListState {
         match self.current {
+            // Tree doesn't use a ListState; fall through to persons as
+            // a harmless default (tree messages don't go through this path).
+            View::Tree => &mut self.persons,
             View::Persons => &mut self.persons,
             View::Families => &mut self.families,
             View::Events => &mut self.events,
@@ -1624,6 +1732,7 @@ impl App {
             return;
         };
         match self.current {
+            View::Tree => {} // no list state to recompute
             View::Persons => person::recompute(snap, &mut self.persons),
             View::Families => family::recompute(snap, &mut self.families),
             View::Events => event::recompute(snap, &mut self.events),
@@ -1655,11 +1764,51 @@ impl App {
         search::recompute(snap, &mut self.search);
     }
 
+    /// Action bar for the tree view - shows + Child / + Father /
+    /// + Mother / + Sibling buttons plus the home person's name.
+    fn tree_action_bar<'a>(&'a self) -> Element<'a, Message> {
+        let mut bar = row![].spacing(8).padding(8).align_y(Alignment::Center);
+
+        let home_name = self
+            .home_person
+            .as_deref()
+            .and_then(|h| {
+                self.snapshot
+                    .as_ref()
+                    .and_then(|s| s.person(h))
+                    .map(|p| p.primary_name.display())
+            })
+            .unwrap_or_else(|| "(no home)".to_string());
+
+        bar = bar.push(text(format!("Home: {home_name}")).size(14));
+
+        if self.saving {
+            bar = bar.push(text("saving...").size(12));
+        } else {
+            bar = bar.push(button(text("+ Child")).on_press(Message::TreeAddChild));
+            bar = bar.push(button(text("+ Father")).on_press(Message::TreeAddFather));
+            bar = bar.push(button(text("+ Mother")).on_press(Message::TreeAddMother));
+            bar = bar.push(button(text("+ Sibling")).on_press(Message::TreeAddSibling));
+        }
+
+        container(bar)
+            .width(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    background: Some(iced::Background::Color(palette.background.weak.color)),
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
     fn count_for(&self, view: View) -> usize {
         let Some(snap) = self.snapshot.as_ref() else {
             return 0;
         };
         match view {
+            View::Tree => snap.persons.len(),
             View::Persons => snap.persons.len(),
             View::Families => snap.families.len(),
             View::Events => snap.events.len(),
@@ -1694,6 +1843,22 @@ impl App {
         if let Some(pos) = state.order.iter().position(|&i| i == hit.index) {
             state.selected = Some(pos);
         }
+    }
+
+    /// Primary surname of the current home person, for pre-filling
+    /// new child/sibling names.
+    fn home_surname(&self) -> Option<String> {
+        let snap = self.snapshot.as_ref()?;
+        let p = snap.person(self.home_person.as_deref()?)?;
+        Some(
+            p.primary_name
+                .surname_list
+                .iter()
+                .find(|s| s.primary)
+                .or_else(|| p.primary_name.surname_list.first())
+                .map(|s| s.surname.clone())
+                .unwrap_or_default(),
+        )
     }
 }
 
@@ -2121,6 +2286,29 @@ async fn delete_async(
                 "delete not supported for view {:?}",
                 other
             )),
+        })?;
+        db.snapshot()
+    })
+    .await;
+    match joined {
+        Ok(Ok(snap)) => Ok(snap),
+        Ok(Err(err)) => Err(format!("{err:#}")),
+        Err(join) => Err(format!("task panicked: {join}")),
+    }
+}
+
+/// Run a relationship-add action (add child/parent/sibling) inside a
+/// write txn, then reload the snapshot.
+async fn tree_action_async<F>(db: Arc<Database>, action: F) -> Result<Snapshot, String>
+where
+    F: FnOnce(&rusqlite::Transaction) -> anyhow::Result<crate::gramps::Person>
+        + Send
+        + 'static,
+{
+    let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
+        db.write_txn(|txn| {
+            action(txn)?;
+            Ok(())
         })?;
         db.snapshot()
     })

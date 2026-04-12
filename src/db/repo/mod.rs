@@ -21,6 +21,7 @@ pub mod media;
 pub mod note;
 pub mod person;
 pub mod place;
+pub mod relationships;
 pub mod repository;
 pub mod source;
 pub mod tag;

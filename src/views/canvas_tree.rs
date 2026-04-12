@@ -180,7 +180,6 @@ fn build_layout(
     // roughly grouped under their parents.
     // First pass: figure out couple groupings within each generation.
     let mut person_x: HashMap<String, f32> = HashMap::new();
-    let min_gen = sorted_gens.first().copied().unwrap_or(0);
 
     for (gen_idx, gen) in sorted_gens.iter().enumerate() {
         let people = &by_gen[gen];
@@ -196,28 +195,12 @@ fn build_layout(
             if let (Some(f), Some(m)) = (fh, mh) {
                 paired.insert(f.clone());
                 paired.insert(m.clone());
-                // Sort couple: try to position children under their parents.
-                // Use the average x of their children (from previous gen) as a hint.
-                let children_avg_x = fam.child_ref_list.iter()
-                    .filter_map(|cr| person_x.get(&cr.r#ref))
-                    .copied()
-                    .collect::<Vec<f32>>();
-                let sort_key = if children_avg_x.is_empty() {
-                    // Use parents from previous generation as hint.
-                    let parent_avg = [snap.person(f), snap.person(m)].iter()
-                        .filter_map(|p| p.as_ref())
-                        .flat_map(|p| p.parent_family_list.iter())
-                        .filter_map(|pfh| snap.family(pfh))
-                        .flat_map(|pf| [pf.father_handle.clone(), pf.mother_handle.clone()])
-                        .filter_map(|h| h)
-                        .filter_map(|h| person_x.get(&h).copied())
-                        .collect::<Vec<f32>>();
-                    if parent_avg.is_empty() { f32::MAX } else {
-                        parent_avg.iter().sum::<f32>() / parent_avg.len() as f32
-                    }
-                } else {
-                    children_avg_x.iter().sum::<f32>() / children_avg_x.len() as f32
-                };
+                // Position couple near their parents from the generation above.
+                let k1 = parent_center_x(snap, f, &person_x);
+                let k2 = parent_center_x(snap, m, &person_x);
+                let sort_key = if k1 < f32::MAX && k2 < f32::MAX { (k1 + k2) / 2.0 }
+                    else if k1 < f32::MAX { k1 }
+                    else { k2 };
                 ordered.push(OrderedItem::Couple(f.clone(), m.clone(), sort_key));
             }
         }
@@ -225,18 +208,7 @@ fn build_layout(
         // Singles (not paired).
         for h in people {
             if !paired.contains(h) {
-                // Try to position near parents.
-                let parent_x = snap.person(h)
-                    .iter()
-                    .flat_map(|p| p.parent_family_list.iter())
-                    .filter_map(|pfh| snap.family(pfh))
-                    .flat_map(|pf| [pf.father_handle.clone(), pf.mother_handle.clone()])
-                    .filter_map(|h| h)
-                    .filter_map(|h| person_x.get(&h).copied())
-                    .collect::<Vec<f32>>();
-                let sort_key = if parent_x.is_empty() { f32::MAX } else {
-                    parent_x.iter().sum::<f32>() / parent_x.len() as f32
-                };
+                let sort_key = parent_center_x(snap, h, &person_x);
                 ordered.push(OrderedItem::Single(h.clone(), sort_key));
             }
         }
@@ -342,6 +314,29 @@ impl OrderedItem {
             OrderedItem::Couple(_, _, k) => *k,
             OrderedItem::Single(_, k) => *k,
         }
+    }
+}
+
+/// Get the average x-position of a person's parents (from the
+/// generation row above). Returns f32::MAX if no parents are positioned.
+fn parent_center_x(
+    snap: &Snapshot,
+    handle: &str,
+    person_x: &HashMap<String, f32>,
+) -> f32 {
+    let Some(person) = snap.person(handle) else { return f32::MAX };
+    let mut xs = Vec::new();
+    for pfh in &person.parent_family_list {
+        let Some(fam) = snap.family(pfh) else { continue };
+        if let Some(ref fh) = fam.father_handle {
+            if let Some(&x) = person_x.get(fh) { xs.push(x); }
+        }
+        if let Some(ref mh) = fam.mother_handle {
+            if let Some(&x) = person_x.get(mh) { xs.push(x); }
+        }
+    }
+    if xs.is_empty() { f32::MAX } else {
+        xs.iter().sum::<f32>() / xs.len() as f32
     }
 }
 

@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
 
 use crate::db::{repo as dbrepo, Database, Snapshot};
@@ -145,6 +145,10 @@ pub struct App {
     /// relationship.
     pending_add: Option<PendingAdd>,
 
+    /// Whether the sidebar is expanded. Hidden by default; toggled by
+    /// a hamburger-style button in the menu bar.
+    sidebar_visible: bool,
+
     error: Option<String>,
     loading: bool,
     /// True while a write transaction is in flight.
@@ -190,6 +194,9 @@ pub struct PendingAdd {
     pub gender_s: String,
     pub birth_year_s: String,
     pub death_year_s: String,
+    /// Optional source URL/description. When non-empty, a Source +
+    /// Citation are auto-created and attached to the new person.
+    pub source_url: String,
 }
 
 /// One open edit — either a brand-new object that hasn't been saved
@@ -376,6 +383,9 @@ pub enum Message {
     AddGender(String),
     AddBirthYear(String),
     AddDeathYear(String),
+    AddSourceUrl(String),
+    /// Toggle sidebar visibility.
+    ToggleSidebar,
 
     // ---- write / edit flow (Phase 4) -----------------------------------
     /// Start creating a new object in the given view (Tag, Note, Repository).
@@ -534,6 +544,7 @@ impl App {
                 delete_confirm: None,
                 context_target: None,
                 pending_add: None,
+                sidebar_visible: false,
                 error: None,
                 loading,
                 saving: false,
@@ -685,6 +696,7 @@ impl App {
                     gender_s: rel.default_gender().to_string(),
                     birth_year_s: String::new(),
                     death_year_s: String::new(),
+                    source_url: String::new(),
                 });
                 Task::none()
             }
@@ -731,6 +743,16 @@ impl App {
                 if let Some(a) = self.pending_add.as_mut() {
                     a.death_year_s = v;
                 }
+                Task::none()
+            }
+            Message::AddSourceUrl(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.source_url = v;
+                }
+                Task::none()
+            }
+            Message::ToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
                 Task::none()
             }
 
@@ -1369,14 +1391,14 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let menu_bar = row![
+            button(text(if self.sidebar_visible { "<<" } else { ">>" }).size(14))
+                .on_press(Message::ToggleSidebar),
             button(text("Open DB…")).on_press(Message::OpenDbDialog),
             text(if self.loading { "loading…" } else { "" }).size(12),
         ]
         .spacing(12)
         .padding(8)
         .align_y(Alignment::Center);
-
-        let nav = self.nav_column();
 
         let body: Element<'_, Message> = match &self.snapshot {
             Some(snap) if self.current == View::Tree => {
@@ -1389,26 +1411,29 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill);
 
-                // Modal overlay for add-person form.
                 if let Some(add) = &self.pending_add {
                     tree_col = tree_col.push(self.add_person_modal(add));
                 }
 
-                row![nav, vertical_separator(), tree_col]
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
+                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
+                if self.sidebar_visible {
+                    main_row = main_row.push(self.nav_column());
+                    main_row = main_row.push(vertical_separator());
+                }
+                main_row = main_row.push(tree_col);
+                main_row.into()
             }
-            Some(snap) => row![
-                nav,
-                vertical_separator(),
-                self.list_pane(snap),
-                vertical_separator(),
-                self.detail_pane(snap),
-            ]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+            Some(snap) => {
+                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
+                if self.sidebar_visible {
+                    main_row = main_row.push(self.nav_column());
+                    main_row = main_row.push(vertical_separator());
+                }
+                main_row = main_row.push(self.list_pane(snap));
+                main_row = main_row.push(vertical_separator());
+                main_row = main_row.push(self.detail_pane(snap));
+                main_row.into()
+            }
             None => container(text(if self.loading {
                 "Loading…"
             } else {
@@ -1982,12 +2007,27 @@ impl App {
         ]
         .spacing(4);
 
+        let gender_options = vec![
+            "Female".to_string(),
+            "Male".to_string(),
+            "Unknown".to_string(),
+        ];
+        let selected_gender = match add.gender_s.as_str() {
+            "0" => Some("Female".to_string()),
+            "1" => Some("Male".to_string()),
+            _ => Some("Unknown".to_string()),
+        };
         let gender_field = column![
-            label("Gender (0=female, 1=male, 2=unknown)"),
-            text_input("2", &add.gender_s)
-                .on_input(Message::AddGender)
-                .padding(6)
-                .width(Length::Fixed(60.0)),
+            label("Gender"),
+            pick_list(gender_options, selected_gender, |picked: String| {
+                let val = match picked.as_str() {
+                    "Female" => "0",
+                    "Male" => "1",
+                    _ => "2",
+                };
+                Message::AddGender(val.to_string())
+            })
+            .width(Length::Fixed(120.0)),
         ]
         .spacing(4);
 
@@ -2009,6 +2049,14 @@ impl App {
         ]
         .spacing(4);
 
+        let source_field = column![
+            label("Source URL / reference (optional)"),
+            text_input("e.g. https://findagrave.com/...", &add.source_url)
+                .on_input(Message::AddSourceUrl)
+                .padding(6),
+        ]
+        .spacing(4);
+
         let buttons = row![
             button(text("Save")).on_press(Message::TreeSubmitAdd),
             button(text("Cancel")).on_press(Message::TreeCancelAdd),
@@ -2022,6 +2070,7 @@ impl App {
                 surname_field,
                 gender_field,
                 row![birth_field, death_field].spacing(16),
+                source_field,
                 buttons,
             ]
             .spacing(12)
@@ -2540,8 +2589,7 @@ async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, 
         let death = add.death_year_s.trim().parse::<i32>().ok().filter(|y| *y != 0);
 
         db.write_txn(|txn| {
-            // First create the person with optional birth/death events.
-            let person = dbrepo::person::create(
+            let mut person = dbrepo::person::create(
                 txn,
                 &add.first_name,
                 &add.surname,
@@ -2550,8 +2598,17 @@ async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, 
                 death,
             )?;
 
-            // Then wire the relationship using the lower-level helpers
-            // that don't re-create the person.
+            // Auto-create Source + Citation if a source URL was provided.
+            let source_url = add.source_url.trim();
+            if !source_url.is_empty() {
+                let src = dbrepo::source::create(txn, source_url, "", "", "")?;
+                let cit = dbrepo::citation::create(txn, &src.handle, source_url, 2, None)?;
+                // Attach the citation to the person's citation_list and
+                // rewrite the person row.
+                person.citation_list.push(cit.handle);
+                dbrepo::person::save_row(txn, &mut person)?;
+            }
+
             match add.relationship {
                 AddRelationship::Child => {
                     dbrepo::relationships::add_child_existing(

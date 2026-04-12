@@ -344,7 +344,7 @@ fn insert(txn: &Transaction, person: &Person) -> Result<()> {
 /// the public update API (which re-applies the editable subset).
 /// Used by Phase 6a Family CRUD to keep reverse links consistent
 /// (appending/removing a family from family_list / parent_family_list).
-pub(super) fn save_row(txn: &Transaction, person: &mut Person) -> Result<()> {
+pub fn save_row(txn: &Transaction, person: &mut Person) -> Result<()> {
     person.change = now_unix();
     update_row(txn, person)
 }

@@ -1,20 +1,12 @@
-//! Family tree view - the default/hero view of the app.
+//! Family tree view - the hero view of the app.
 //!
-//! Centered on a "home person", renders:
-//!
-//! - Great-grandparents (generation -3) as small cards
-//! - Grandparents (generation -2)
-//! - Parents (generation -1)
-//! - Home person (generation 0, prominent card)
-//! - Children (generation +1)
-//! - Grandchildren (generation +2)
-//!
-//! Clicking a person card re-homes the tree on that person.
-//! The action bar above shows: + Parent / + Child / + Sibling /
-//! Edit / Delete for the current home person. Right-click context
-//! menus are deferred to a polish iteration.
+//! Shows ancestors above, the home person + siblings + spouse in the
+//! center, and descendants below. The entire tree is scrollable in
+//! both directions for large families. Right-click any person card
+//! to open the context menu.
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
@@ -22,13 +14,9 @@ use crate::db::Snapshot;
 use crate::gramps::Person;
 use crate::views::widgets::date_display;
 
-/// Maximum ancestor depth to render (0 = home only, 3 = up to
-/// great-grandparents). Deeper trees are cut off with an indicator.
 const MAX_DEPTH: usize = 3;
-/// Maximum descendant depth.
 const MAX_DESC_DEPTH: usize = 2;
 
-/// A node in the precomputed ancestor/descendant tree.
 #[derive(Debug, Clone)]
 pub struct TreeNode {
     pub handle: String,
@@ -37,7 +25,6 @@ pub struct TreeNode {
     pub years: String,
 }
 
-/// Precomputed ancestor tree (binary tree: father + mother).
 #[derive(Debug, Clone)]
 pub struct AncestorNode {
     pub person: TreeNode,
@@ -45,7 +32,6 @@ pub struct AncestorNode {
     pub mother: Option<Box<AncestorNode>>,
 }
 
-/// Build a `TreeNode` from a `Person` + snapshot for resolving dates.
 fn node_from_person(person: &Person, snap: &Snapshot) -> TreeNode {
     let birth = if person.birth_ref_index >= 0 {
         person
@@ -83,11 +69,9 @@ fn node_from_person(person: &Person, snap: &Snapshot) -> TreeNode {
     }
 }
 
-/// Build the ancestor tree rooted at `handle`, up to `depth` levels.
 pub fn build_ancestors(snap: &Snapshot, handle: &str, depth: usize) -> Option<AncestorNode> {
     let person = snap.person(handle)?;
     let node = node_from_person(person, snap);
-
     if depth == 0 {
         return Some(AncestorNode {
             person: node,
@@ -95,44 +79,61 @@ pub fn build_ancestors(snap: &Snapshot, handle: &str, depth: usize) -> Option<An
             mother: None,
         });
     }
-
-    // Walk the person's parent_family_list to find parents.
     let (father, mother) = person
         .parent_family_list
         .first()
         .and_then(|fh| snap.family(fh))
         .map(|fam| {
-            let f = fam
-                .father_handle
-                .as_ref()
+            let f = fam.father_handle.as_ref()
                 .and_then(|h| build_ancestors(snap, h, depth - 1))
                 .map(Box::new);
-            let m = fam
-                .mother_handle
-                .as_ref()
+            let m = fam.mother_handle.as_ref()
                 .and_then(|h| build_ancestors(snap, h, depth - 1))
                 .map(Box::new);
             (f, m)
         })
         .unwrap_or((None, None));
-
-    Some(AncestorNode {
-        person: node,
-        father,
-        mother,
-    })
+    Some(AncestorNode { person: node, father, mother })
 }
 
-/// Collect the direct children of `handle` (via family_list → child_ref_list).
-pub fn collect_children(snap: &Snapshot, handle: &str) -> Vec<TreeNode> {
-    let Some(person) = snap.person(handle) else {
-        return Vec::new();
-    };
+/// Siblings of the home person (other children of same parents).
+fn collect_siblings(snap: &Snapshot, home_handle: &str) -> Vec<TreeNode> {
+    let Some(person) = snap.person(home_handle) else { return Vec::new() };
+    let Some(fam_handle) = person.parent_family_list.first() else { return Vec::new() };
+    let Some(fam) = snap.family(fam_handle) else { return Vec::new() };
+    fam.child_ref_list
+        .iter()
+        .filter(|cr| cr.r#ref != home_handle)
+        .filter_map(|cr| snap.person(&cr.r#ref))
+        .map(|p| node_from_person(p, snap))
+        .collect()
+}
+
+/// Spouses of the home person (the other parent in each of their families).
+fn collect_spouses(snap: &Snapshot, home_handle: &str) -> Vec<TreeNode> {
+    let Some(person) = snap.person(home_handle) else { return Vec::new() };
+    let mut spouses = Vec::new();
+    for fam_handle in &person.family_list {
+        let Some(fam) = snap.family(fam_handle) else { continue };
+        let spouse_handle = if fam.father_handle.as_deref() == Some(home_handle) {
+            fam.mother_handle.as_deref()
+        } else {
+            fam.father_handle.as_deref()
+        };
+        if let Some(sh) = spouse_handle {
+            if let Some(sp) = snap.person(sh) {
+                spouses.push(node_from_person(sp, snap));
+            }
+        }
+    }
+    spouses
+}
+
+fn collect_children(snap: &Snapshot, handle: &str) -> Vec<TreeNode> {
+    let Some(person) = snap.person(handle) else { return Vec::new() };
     let mut children = Vec::new();
     for fam_handle in &person.family_list {
-        let Some(fam) = snap.family(fam_handle) else {
-            continue;
-        };
+        let Some(fam) = snap.family(fam_handle) else { continue };
         for cr in &fam.child_ref_list {
             if let Some(child) = snap.person(&cr.r#ref) {
                 children.push(node_from_person(child, snap));
@@ -142,37 +143,47 @@ pub fn collect_children(snap: &Snapshot, handle: &str) -> Vec<TreeNode> {
     children
 }
 
-/// Collect descendants recursively up to `depth` levels.
-pub fn collect_descendants(
+fn collect_descendants(
     snap: &Snapshot,
     handle: &str,
     depth: usize,
 ) -> Vec<(TreeNode, Vec<TreeNode>)> {
-    if depth == 0 {
-        return Vec::new();
-    }
-    let children = collect_children(snap, handle);
-    children
+    if depth == 0 { return Vec::new() }
+    collect_children(snap, handle)
         .into_iter()
         .map(|child| {
-            let grandchildren = if depth > 1 {
-                collect_children(snap, &child.handle)
-            } else {
-                Vec::new()
-            };
-            (child, grandchildren)
+            let gc = if depth > 1 { collect_children(snap, &child.handle) } else { Vec::new() };
+            (child, gc)
         })
         .collect()
 }
 
-/// Render the full tree view: ancestors above, home in the middle,
-/// descendants below.
-pub fn view<'a>(
-    snap: &'a Snapshot,
-    home_handle: &str,
-) -> Element<'a, Message> {
+fn collect_generation_nodes(
+    node: &AncestorNode,
+    current_depth: usize,
+    max_depth: usize,
+    layers: &mut Vec<Vec<TreeNode>>,
+) {
+    while layers.len() <= current_depth {
+        layers.push(Vec::new());
+    }
+    layers[current_depth].push(node.person.clone());
+    if current_depth < max_depth {
+        if let Some(f) = &node.father {
+            collect_generation_nodes(f, current_depth + 1, max_depth, layers);
+        }
+        if let Some(m) = &node.mother {
+            collect_generation_nodes(m, current_depth + 1, max_depth, layers);
+        }
+    }
+}
+
+/// Render the full tree with pan/scroll in both directions.
+pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
     let ancestors = build_ancestors(snap, home_handle, MAX_DEPTH);
     let descendants = collect_descendants(snap, home_handle, MAX_DESC_DEPTH);
+    let siblings = collect_siblings(snap, home_handle);
+    let spouses = collect_spouses(snap, home_handle);
 
     let Some(tree) = ancestors else {
         return container(text("Home person not found in tree.").size(16))
@@ -183,26 +194,22 @@ pub fn view<'a>(
             .into();
     };
 
-    let mut col = column![].spacing(20).padding(24).align_x(Alignment::Center);
+    let mut col = column![].spacing(4).padding(24).align_x(Alignment::Center);
 
-    // Collect ancestor nodes into flat generation layers.
+    // Ancestor generations.
     let mut layers: Vec<Vec<TreeNode>> = Vec::new();
     collect_generation_nodes(&tree, 0, MAX_DEPTH, &mut layers);
     layers.reverse();
 
     for (gen_idx, layer) in layers.into_iter().enumerate() {
-        // The last layer (after reverse) is the home person — rendered
-        // prominently below rather than in this loop.
-        if gen_idx == MAX_DEPTH {
-            break;
-        }
+        if gen_idx == MAX_DEPTH { break; }
         let gen_label: String = match MAX_DEPTH - gen_idx {
             1 => "Parents".to_string(),
             2 => "Grandparents".to_string(),
             3 => "Great-grandparents".to_string(),
             n => format!("{n}x great-grandparents"),
         };
-        let mut r = row![].spacing(16).align_y(Alignment::Center);
+        let mut r = row![].spacing(12).align_y(Alignment::Center);
         for node in layer {
             r = r.push(person_card(node, false));
         }
@@ -214,27 +221,54 @@ pub fn view<'a>(
             .spacing(4)
             .align_x(Alignment::Center),
         );
+        col = col.push(connector_vertical());
     }
 
-    // Home person — prominent card.
-    col = col.push(
-        column![
-            text("").size(4),
-            person_card(tree.person, true),
-            text("").size(4),
-        ]
-        .align_x(Alignment::Center),
-    );
+    // Home row: siblings + HOME + spouse.
+    let mut home_row = row![].spacing(12).align_y(Alignment::Center);
+
+    if !siblings.is_empty() {
+        let mut sib_col = column![
+            text("Siblings").size(10).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        ].spacing(4).align_x(Alignment::Center);
+        let mut sib_row = row![].spacing(8);
+        for sib in siblings {
+            sib_row = sib_row.push(person_card(sib, false));
+        }
+        sib_col = sib_col.push(sib_row);
+        home_row = home_row.push(sib_col);
+        home_row = home_row.push(connector_horizontal());
+    }
+
+    home_row = home_row.push(person_card(tree.person, true));
+
+    if !spouses.is_empty() {
+        home_row = home_row.push(connector_horizontal());
+        for sp in spouses {
+            home_row = home_row.push(
+                column![
+                    text("Spouse").size(10).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                    person_card(sp, false),
+                ]
+                .spacing(4)
+                .align_x(Alignment::Center),
+            );
+        }
+    }
+
+    col = col.push(home_row);
 
     // Descendants.
     if !descendants.is_empty() {
-        let mut children_row = row![].spacing(16).align_y(Alignment::Start);
+        col = col.push(connector_vertical());
+        let mut children_row = row![].spacing(12).align_y(Alignment::Start);
         for (child, grandchildren) in descendants {
             let mut child_col = column![person_card(child, false)]
-                .spacing(8)
+                .spacing(6)
                 .align_x(Alignment::Center);
             if !grandchildren.is_empty() {
-                let mut gc_row = row![].spacing(8);
+                child_col = child_col.push(connector_vertical_small());
+                let mut gc_row = row![].spacing(6);
                 for gc in grandchildren {
                     gc_row = gc_row.push(person_card_small(gc));
                 }
@@ -252,40 +286,72 @@ pub fn view<'a>(
         );
     }
 
-    container(scrollable(col))
+    // Wrap in a bi-directional scrollable for large trees.
+    // Content must be Shrink width so horizontal scroll works.
+    let scroll = scrollable(
+        container(col)
+            .width(Length::Shrink)
+            .padding([0, 40]),
+    )
+    .direction(Direction::Both {
+        horizontal: Scrollbar::default(),
+        vertical: Scrollbar::default(),
+    })
+    .width(Length::Fill)
+    .height(Length::Fill);
+
+    container(scroll)
         .width(Length::Fill)
         .height(Length::Fill)
-        .center_x(Length::Fill)
         .into()
 }
 
-/// Collect owned TreeNodes into generation layers (BFS-style).
-/// Each layer owns its TreeNode clones so the returned
-/// `Vec<Vec<TreeNode>>` doesn't borrow from the tree.
-fn collect_generation_nodes(
-    node: &AncestorNode,
-    current_depth: usize,
-    max_depth: usize,
-    layers: &mut Vec<Vec<TreeNode>>,
-) {
-    while layers.len() <= current_depth {
-        layers.push(Vec::new());
-    }
-    layers[current_depth].push(node.person.clone());
+// ---- visual connectors ------------------------------------------------
 
-    if current_depth < max_depth {
-        if let Some(f) = &node.father {
-            collect_generation_nodes(f, current_depth + 1, max_depth, layers);
-        }
-        if let Some(m) = &node.mother {
-            collect_generation_nodes(m, current_depth + 1, max_depth, layers);
-        }
-    }
+fn connector_vertical() -> Element<'static, Message> {
+    container(text(""))
+        .width(Length::Fixed(2.0))
+        .height(Length::Fixed(20.0))
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(iced::Background::Color(palette.background.strong.color)),
+                ..Default::default()
+            }
+        })
+        .into()
 }
 
-/// A clickable person card.
-/// - Left-click → re-home the tree on this person.
-/// - Right-click → open context menu for this person.
+fn connector_vertical_small() -> Element<'static, Message> {
+    container(text(""))
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(12.0))
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(iced::Background::Color(palette.background.strong.color)),
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn connector_horizontal() -> Element<'static, Message> {
+    container(text(""))
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(2.0))
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(iced::Background::Color(palette.background.strong.color)),
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+// ---- person cards ------------------------------------------------------
+
 fn person_card(node: TreeNode, is_home: bool) -> Element<'static, Message> {
     let name_size = if is_home { 20 } else { 14 };
     let years_size = if is_home { 14 } else { 11 };

@@ -367,16 +367,11 @@ fn render_family(
     family_col.into()
 }
 
-/// Render the bracket connector: a horizontal line with vertical
-/// drops to each child. Creates the classic family tree look:
-///
-/// ```text
-///     ─────────────────
-///     |       |       |
-///   [C1]    [C2]    [C3]
-/// ```
+/// Render the bracket connector: each child gets a vertical stub
+/// above it from a shared horizontal bracket line. Uses a styled
+/// top-border container to avoid Length::Fill (which crashes in
+/// Direction::Both scrollables).
 fn bracket_connector(children: Vec<Element<'static, Message>>) -> Element<'static, Message> {
-    // Each child gets a vertical stub above it, then the card below.
     let mut children_row = row![].spacing(20).align_y(Alignment::Start);
     for child in children {
         children_row = children_row.push(
@@ -396,20 +391,20 @@ fn bracket_connector(children: Vec<Element<'static, Message>>) -> Element<'stati
         );
     }
 
-    // The horizontal bracket line spans the full width of the children.
-    column![
-        container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fixed(2.0))
-            .style(|_: &Theme| container::Style {
-                background: Some(iced::Background::Color(theme::CONNECTOR)),
-                ..Default::default()
-            }),
-        children_row,
-    ]
-    .spacing(0)
-    .align_x(Alignment::Center)
-    .into()
+    // Use a container with a top-styled border to create the
+    // horizontal bracket effect without Length::Fill.
+    // Wrap in a container with a visible top border to create
+    // the bracket effect.
+    container(children_row)
+        .style(|_: &Theme| container::Style {
+            border: iced::Border {
+                color: theme::CONNECTOR,
+                width: 2.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 fn mk_info(person: &crate::gramps::Person, snap: &Snapshot, home_handle: &str) -> PersonInfo {

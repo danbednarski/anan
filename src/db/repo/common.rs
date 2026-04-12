@@ -1,7 +1,7 @@
 //! Shared helpers for the CRUD functions in sibling modules.
 
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection};
 
 /// Current unix time in seconds, suitable for the `change` column.
 pub fn now_unix() -> i64 {
@@ -57,13 +57,13 @@ pub fn new_handle() -> String {
 /// target table, treating only rows whose id starts with the expected
 /// letter as candidates. Returns a zero-padded 4-digit id like
 /// `N0005`, `R0012`, etc. — matching the Gramps core convention.
-pub fn next_gramps_id(txn: &Transaction, table: &str, prefix: char) -> Result<String> {
+pub fn next_gramps_id(conn: &Connection, table: &str, prefix: char) -> Result<String> {
     // GLOB '[A-Z][0-9]*' matches a letter followed by at least one digit.
     // We filter by prefix after reading to keep the SQL simple.
     let sql = format!(
         "SELECT gramps_id FROM {table} WHERE gramps_id GLOB '{prefix}[0-9]*'"
     );
-    let mut stmt = txn
+    let mut stmt = conn
         .prepare(&sql)
         .with_context(|| format!("prepare {sql}"))?;
     let rows = stmt
@@ -88,12 +88,12 @@ pub fn next_gramps_id(txn: &Transaction, table: &str, prefix: char) -> Result<St
 /// This function deletes every existing row where `obj_handle` matches
 /// and re-inserts from the provided list. Call it on every write.
 pub fn rewrite_references(
-    txn: &Transaction,
+    conn: &Connection,
     obj_handle: &str,
     obj_class: &str,
     refs: &[(String, String)], // (ref_handle, ref_class)
 ) -> Result<()> {
-    txn.execute(
+    conn.execute(
         "DELETE FROM reference WHERE obj_handle = ?1",
         params![obj_handle],
     )
@@ -103,7 +103,7 @@ pub fn rewrite_references(
         return Ok(());
     }
 
-    let mut stmt = txn
+    let mut stmt = conn
         .prepare(
             "INSERT INTO reference (obj_handle, obj_class, ref_handle, ref_class) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -119,8 +119,8 @@ pub fn rewrite_references(
 /// Count inbound references to `handle` — i.e. the number of
 /// `reference` rows with `ref_handle = handle`. Used to refuse deletion
 /// of objects that are still in use by some other object.
-pub fn inbound_ref_count(txn: &Transaction, handle: &str) -> Result<i64> {
-    txn.query_row(
+pub fn inbound_ref_count(conn: &Connection, handle: &str) -> Result<i64> {
+    conn.query_row(
         "SELECT COUNT(*) FROM reference WHERE ref_handle = ?1",
         params![handle],
         |r| r.get(0),

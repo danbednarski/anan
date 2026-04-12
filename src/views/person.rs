@@ -2,13 +2,13 @@
 
 use std::cmp::Ordering;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::detail_ui::{chip, field, section};
 use super::list_pane::{self, ListState};
 use super::widgets::date_display;
-use crate::app::Message;
+use crate::app::{Message, PersonDraft};
 use crate::db::Snapshot;
 use crate::gramps::enums::{event_type_label, gender_label};
 use crate::gramps::{Event, Family, Person};
@@ -190,4 +190,75 @@ fn family_summary(fam: &Family, snap: &Snapshot) -> String {
         name_of(&fam.mother_handle),
         fam.child_ref_list.len()
     )
+}
+
+/// Edit-form view for a Person. Phase 5 exposes name, gender, and
+/// optional birth / death years. Other fields on the person (alternate
+/// names, addresses, urls, media, etc.) are preserved on update but
+/// not editable from this form yet.
+pub fn edit_view<'a>(draft: &'a PersonDraft, creating: bool) -> Element<'a, Message> {
+    let title = text(if creating { "New person" } else { "Edit person" }).size(24);
+
+    let first_name_field = column![
+        text("First name").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("First name", &draft.first_name)
+            .on_input(Message::EditPersonFirstName)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let surname_field = column![
+        text("Surname").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("Surname", &draft.surname)
+            .on_input(Message::EditPersonSurname)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let gender_field = column![
+        text("Gender  (0 female · 1 male · 2 unknown)")
+            .size(11)
+            .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("2", &draft.gender_s)
+            .on_input(Message::EditPersonGender)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let birth_field = column![
+        text("Birth year (leave blank for unknown)")
+            .size(11)
+            .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("e.g. 1890", &draft.birth_year_s)
+            .on_input(Message::EditPersonBirthYear)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let death_field = column![
+        text("Death year (leave blank for unknown)")
+            .size(11)
+            .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text_input("e.g. 1965", &draft.death_year_s)
+            .on_input(Message::EditPersonDeathYear)
+            .padding(6),
+    ]
+    .spacing(4);
+
+    let body = column![
+        title,
+        first_name_field,
+        surname_field,
+        gender_field,
+        birth_field,
+        death_field
+    ]
+    .spacing(14)
+    .padding(24)
+    .align_x(Alignment::Start);
+
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

@@ -14,6 +14,9 @@
 //! and bump the `change` column to the current unix time.
 
 pub mod common;
+pub mod event;
+pub mod family;
 pub mod note;
+pub mod person;
 pub mod repository;
 pub mod tag;

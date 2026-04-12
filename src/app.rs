@@ -115,8 +115,8 @@ pub struct App {
 
     /// Active in-place edit session, or `None` when not editing.
     edit: Option<EditSession>,
-    /// Handle awaiting delete confirmation; second click commits.
-    delete_confirm: Option<String>,
+    /// Pending deletion awaiting confirmation (second click commits).
+    delete_confirm: Option<PendingDelete>,
 
     error: Option<String>,
     loading: bool,
@@ -138,6 +138,19 @@ pub enum EditDraft {
     Tag(TagDraft),
     Note(NoteDraft),
     Repository(RepoDraft),
+    Person(PersonDraft),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PersonDraft {
+    pub first_name: String,
+    pub surname: String,
+    /// Gender as a string: 0 female, 1 male, 2 unknown. Parsed on save.
+    pub gender_s: String,
+    /// Empty string = "no birth year"; otherwise parsed as i32.
+    pub birth_year_s: String,
+    /// Empty string = "no death year"; otherwise parsed as i32.
+    pub death_year_s: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -157,6 +170,31 @@ pub struct NoteDraft {
 pub struct RepoDraft {
     pub name: String,
     pub type_value_s: String,
+}
+
+/// A pending delete awaiting user confirmation. For simple types
+/// (Tag/Note/Repository) this is just the handle + view; for Person
+/// it also carries the cascade preview so the action bar can show
+/// "in 3 families, 2 events" before the user clicks Confirm.
+#[derive(Debug, Clone)]
+pub struct PendingDelete {
+    pub view: View,
+    pub handle: String,
+    pub cascade: Option<PersonCascade>,
+}
+
+/// Summary of what a Person delete will do. Mirrors
+/// [`crate::db::repo::person::DeletePreview`] but lives in App state
+/// so the UI can render it. The `delete_owned_events` toggle
+/// corresponds to the `delete_owned_events` flag on the backend.
+#[derive(Debug, Clone)]
+pub struct PersonCascade {
+    pub display_name: String,
+    pub parent_of: Vec<String>,
+    pub child_of: Vec<String>,
+    pub event_count: usize,
+    pub exclusive_event_count: usize,
+    pub delete_owned_events: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +249,14 @@ pub enum Message {
     EditNoteType(String),
     EditRepoName(String),
     EditRepoType(String),
+    EditPersonFirstName(String),
+    EditPersonSurname(String),
+    EditPersonGender(String),
+    EditPersonBirthYear(String),
+    EditPersonDeathYear(String),
+    /// User toggled "also delete this person's exclusive events" on
+    /// the cascade confirmation banner.
+    ToggleDeleteOwnedEvents,
 }
 
 /// Package returned by the async open-db task: both the persistent
@@ -430,23 +476,64 @@ impl App {
                 Task::none()
             }
             Message::StartDelete(handle) => {
-                self.delete_confirm = Some(handle);
+                let view = self.current;
+                let cascade = if view == View::Persons {
+                    self.db.as_ref().and_then(|db| {
+                        match db.with_conn(|c| dbrepo::person::preview_delete(c, &handle)) {
+                            Ok(preview) => Some(PersonCascade {
+                                display_name: preview.display_name,
+                                parent_of: preview.parent_of,
+                                child_of: preview.child_of,
+                                event_count: preview.event_count,
+                                exclusive_event_count: preview.exclusive_event_count,
+                                // Default: keep orphan events. User can
+                                // opt into cascade-deleting them.
+                                delete_owned_events: false,
+                            }),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "preview_delete failed");
+                                None
+                            }
+                        }
+                    })
+                } else {
+                    None
+                };
+                self.delete_confirm = Some(PendingDelete {
+                    view,
+                    handle,
+                    cascade,
+                });
                 Task::none()
             }
             Message::CancelDelete => {
                 self.delete_confirm = None;
                 Task::none()
             }
+            Message::ToggleDeleteOwnedEvents => {
+                if let Some(PendingDelete {
+                    cascade: Some(c), ..
+                }) = self.delete_confirm.as_mut()
+                {
+                    c.delete_owned_events = !c.delete_owned_events;
+                }
+                Task::none()
+            }
             Message::ConfirmDelete => {
-                let (Some(db), Some(handle)) = (self.db.clone(), self.delete_confirm.take())
+                let (Some(db), Some(pending)) = (self.db.clone(), self.delete_confirm.take())
                 else {
                     return Task::none();
                 };
-                let view = self.current;
                 self.saving = true;
-                Task::perform(delete_async(db, view, handle), |r| {
-                    Message::WriteCompleted(Box::new(r))
-                })
+                let delete_owned = pending
+                    .cascade
+                    .as_ref()
+                    .map(|c| c.delete_owned_events)
+                    .unwrap_or(false);
+                Task::perform(
+                    delete_async(db, pending.view, pending.handle, delete_owned),
+                    |r| Message::WriteCompleted(Box::new(r)),
+                )
             }
 
             // ---- draft field edits ---------------------------------------
@@ -492,6 +579,36 @@ impl App {
                 }
                 Task::none()
             }
+            Message::EditPersonFirstName(v) => {
+                if let Some(EditDraft::Person(d)) = self.draft_mut() {
+                    d.first_name = v;
+                }
+                Task::none()
+            }
+            Message::EditPersonSurname(v) => {
+                if let Some(EditDraft::Person(d)) = self.draft_mut() {
+                    d.surname = v;
+                }
+                Task::none()
+            }
+            Message::EditPersonGender(v) => {
+                if let Some(EditDraft::Person(d)) = self.draft_mut() {
+                    d.gender_s = v;
+                }
+                Task::none()
+            }
+            Message::EditPersonBirthYear(v) => {
+                if let Some(EditDraft::Person(d)) = self.draft_mut() {
+                    d.birth_year_s = v;
+                }
+                Task::none()
+            }
+            Message::EditPersonDeathYear(v) => {
+                if let Some(EditDraft::Person(d)) = self.draft_mut() {
+                    d.death_year_s = v;
+                }
+                Task::none()
+            }
         }
     }
 
@@ -505,6 +622,52 @@ impl App {
     fn populate_edit_from_selection(&self) -> Option<EditSession> {
         let snap = self.snapshot.as_ref()?;
         match self.current {
+            View::Persons => {
+                let idx = self.persons.selected_item()?;
+                let p = snap.persons.get(idx)?;
+                let surname = p
+                    .primary_name
+                    .surname_list
+                    .iter()
+                    .find(|s| s.primary)
+                    .or_else(|| p.primary_name.surname_list.first())
+                    .map(|s| s.surname.clone())
+                    .unwrap_or_default();
+                let birth_year = if p.birth_ref_index >= 0 {
+                    p.event_ref_list
+                        .get(p.birth_ref_index as usize)
+                        .and_then(|er| snap.event(&er.r#ref))
+                        .and_then(|e| e.date.as_ref())
+                        .map(|d| d.primary_year())
+                        .filter(|y| *y != 0)
+                } else {
+                    None
+                };
+                let death_year = if p.death_ref_index >= 0 {
+                    p.event_ref_list
+                        .get(p.death_ref_index as usize)
+                        .and_then(|er| snap.event(&er.r#ref))
+                        .and_then(|e| e.date.as_ref())
+                        .map(|d| d.primary_year())
+                        .filter(|y| *y != 0)
+                } else {
+                    None
+                };
+                Some(EditSession {
+                    handle: Some(p.handle.clone()),
+                    draft: EditDraft::Person(PersonDraft {
+                        first_name: p.primary_name.first_name.clone(),
+                        surname,
+                        gender_s: p.gender.to_string(),
+                        birth_year_s: birth_year
+                            .map(|y| y.to_string())
+                            .unwrap_or_default(),
+                        death_year_s: death_year
+                            .map(|y| y.to_string())
+                            .unwrap_or_default(),
+                    }),
+                })
+            }
             View::Tags => {
                 let idx = self.tags.selected_item()?;
                 let tag = snap.tags.get(idx)?;
@@ -665,6 +828,7 @@ impl App {
         if let Some(session) = &self.edit {
             let creating = session.handle.is_none();
             match (&session.draft, self.current) {
+                (EditDraft::Person(d), View::Persons) => return person::edit_view(d, creating),
                 (EditDraft::Tag(d), View::Tags) => return tag::edit_view(d, creating),
                 (EditDraft::Note(d), View::Notes) => return note::edit_view(d, creating),
                 (EditDraft::Repository(d), View::Repositories) => {
@@ -775,7 +939,7 @@ impl App {
     fn action_bar<'a>(&'a self) -> Element<'a, Message> {
         let editable = matches!(
             self.current,
-            View::Tags | View::Notes | View::Repositories
+            View::Persons | View::Tags | View::Notes | View::Repositories
         );
         let has_selection = self.current_selected_handle().is_some();
 
@@ -783,7 +947,7 @@ impl App {
 
         if !editable {
             bar = bar.push(
-                text("(read-only in Phase 4)")
+                text("(read-only in Phase 5)")
                     .size(11)
                     .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
             );
@@ -792,8 +956,7 @@ impl App {
 
         if self.edit.is_some() {
             // Save / Cancel while editing
-            let save_btn: iced::widget::Button<'_, Message> =
-                button(text("Save"));
+            let save_btn: iced::widget::Button<'_, Message> = button(text("Save"));
             let save_btn = if self.saving {
                 save_btn
             } else {
@@ -804,14 +967,8 @@ impl App {
             if self.saving {
                 bar = bar.push(text("saving…").size(12));
             }
-        } else if let Some(handle) = self.delete_confirm.clone() {
-            bar = bar.push(
-                text(format!("Delete {}?", short(&handle)))
-                    .size(13)
-                    .color(iced::Color::from_rgb(0.7, 0.1, 0.1)),
-            );
-            bar = bar.push(button(text("Confirm delete")).on_press(Message::ConfirmDelete));
-            bar = bar.push(button(text("Keep")).on_press(Message::CancelDelete));
+        } else if let Some(pending) = self.delete_confirm.as_ref() {
+            return self.delete_confirm_bar(pending);
         } else {
             bar = bar.push(
                 button(text("+ New")).on_press(Message::StartCreate(self.current)),
@@ -836,12 +993,93 @@ impl App {
             .into()
     }
 
+    fn delete_confirm_bar<'a>(
+        &'a self,
+        pending: &'a PendingDelete,
+    ) -> Element<'a, Message> {
+        let mut col = column![].spacing(6).padding(8);
+
+        let headline = match &pending.cascade {
+            Some(c) => format!(
+                "Delete {} ({})? This will rewrite {} parent-of famil{}, {} child-of famil{}, and touch {} event{}.",
+                c.display_name,
+                short(&pending.handle),
+                c.parent_of.len(),
+                if c.parent_of.len() == 1 { "y" } else { "ies" },
+                c.child_of.len(),
+                if c.child_of.len() == 1 { "y" } else { "ies" },
+                c.event_count,
+                if c.event_count == 1 { "" } else { "s" },
+            ),
+            None => format!("Delete {}?", short(&pending.handle)),
+        };
+        col = col.push(
+            text(headline)
+                .size(13)
+                .color(iced::Color::from_rgb(0.7, 0.1, 0.1)),
+        );
+
+        if let Some(c) = &pending.cascade {
+            if !c.parent_of.is_empty() {
+                col = col.push(
+                    text(format!("  · parent of: {}", c.parent_of.join(", "))).size(12),
+                );
+            }
+            if !c.child_of.is_empty() {
+                col = col.push(
+                    text(format!("  · child of: {}", c.child_of.join(", "))).size(12),
+                );
+            }
+            if c.event_count > 0 {
+                col = col.push(
+                    text(format!(
+                        "  · {} of {} events are exclusive to this person",
+                        c.exclusive_event_count, c.event_count
+                    ))
+                    .size(12),
+                );
+                let toggle_label = if c.delete_owned_events {
+                    "[x] also delete exclusive events"
+                } else {
+                    "[ ] also delete exclusive events"
+                };
+                col = col.push(
+                    button(text(toggle_label).size(12))
+                        .on_press(Message::ToggleDeleteOwnedEvents),
+                );
+            }
+        }
+
+        let controls = row![
+            button(text("Confirm delete")).on_press(Message::ConfirmDelete),
+            button(text("Keep")).on_press(Message::CancelDelete),
+        ]
+        .spacing(8);
+        col = col.push(controls);
+
+        container(col)
+            .width(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    background: Some(iced::Background::Color(palette.danger.weak.color)),
+                    text_color: Some(palette.danger.weak.text),
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
     /// Handle of the currently-selected object in the current view, if
     /// the view is one of Tag / Note / Repository and something is
     /// selected. Other views return `None`.
     fn current_selected_handle(&self) -> Option<String> {
         let snap = self.snapshot.as_ref()?;
         match self.current {
+            View::Persons => {
+                let i = self.persons.selected_item()?;
+                Some(snap.persons.get(i)?.handle.clone())
+            }
             View::Tags => {
                 let i = self.tags.selected_item()?;
                 Some(snap.tags.get(i)?.handle.clone())
@@ -1084,6 +1322,45 @@ async fn save_async(db: Arc<Database>, session: EditSession) -> Result<Snapshot,
                 }
                 Ok(())
             }
+            EditDraft::Person(draft) => {
+                let gender = draft.gender_s.parse().unwrap_or(2);
+                let birth = draft
+                    .birth_year_s
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|y| *y != 0);
+                let death = draft
+                    .death_year_s
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|y| *y != 0);
+                match session.handle {
+                    Some(h) => {
+                        dbrepo::person::update(
+                            txn,
+                            &h,
+                            &draft.first_name,
+                            &draft.surname,
+                            gender,
+                            birth,
+                            death,
+                        )?;
+                    }
+                    None => {
+                        dbrepo::person::create(
+                            txn,
+                            &draft.first_name,
+                            &draft.surname,
+                            gender,
+                            birth,
+                            death,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
         })?;
         db.snapshot()
     })
@@ -1097,13 +1374,20 @@ async fn save_async(db: Arc<Database>, session: EditSession) -> Result<Snapshot,
 
 /// Run a delete transaction for the current view's selected object,
 /// then reload the snapshot.
+///
+/// `delete_owned_events` only matters for Person deletes — it's
+/// forwarded to [`dbrepo::person::delete_with_cascade`].
 async fn delete_async(
     db: Arc<Database>,
     view: View,
     handle: String,
+    delete_owned_events: bool,
 ) -> Result<Snapshot, String> {
     let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
         db.write_txn(|txn| match view {
+            View::Persons => {
+                dbrepo::person::delete_with_cascade(txn, &handle, delete_owned_events)
+            }
             View::Tags => dbrepo::tag::delete(txn, &handle),
             View::Notes => dbrepo::note::delete(txn, &handle),
             View::Repositories => dbrepo::repository::delete(txn, &handle),
@@ -1124,6 +1408,14 @@ async fn delete_async(
 
 fn default_draft_for(view: View) -> EditDraft {
     match view {
+        View::Persons => EditDraft::Person(PersonDraft {
+            first_name: String::new(),
+            surname: String::new(),
+            // Gender::Unknown = 2
+            gender_s: "2".to_string(),
+            birth_year_s: String::new(),
+            death_year_s: String::new(),
+        }),
         View::Tags => EditDraft::Tag(TagDraft {
             name: "New tag".to_string(),
             color: "#888888".to_string(),

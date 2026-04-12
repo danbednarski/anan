@@ -92,6 +92,21 @@ impl Database {
         load_from_conn(&conn, self.path.clone())
     }
 
+    /// Run `f` with a borrowed read-only view of the connection. No
+    /// transaction, no backup-before-write. Use this for cheap
+    /// read-side queries like the delete-cascade preview — write
+    /// operations should still go through [`Database::write_txn`].
+    pub fn with_conn<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&Connection) -> Result<R>,
+    {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("connection mutex poisoned"))?;
+        f(&conn)
+    }
+
     /// Run `f` inside a SQLite transaction. Commits on `Ok`, rolls back
     /// on `Err`. A backup is written first if stale.
     ///

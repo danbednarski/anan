@@ -1484,12 +1484,11 @@ impl App {
             Some(snap) if matches!(self.current, View::Tree | View::Network) => {
                 let content_body = match &self.home_person {
                     Some(h) => match (self.current, self.list_mode) {
-                        // Family Tree: default = pedigree tree, toggle = flat list of tree scope
+                        // list_mode is absolute: false = tree/map, true = list.
                         (View::Tree, false) => tree::view(snap, h, self.context_target.as_deref()),
                         (View::Tree, true) => tree::list_view(snap, h),
-                        // Full Network: default = flat list, toggle = extended tree with aunts/uncles
-                        (View::Network, false) => network::view(snap, h),
-                        (View::Network, true) => network::tree_view(snap, h, self.context_target.as_deref()),
+                        (View::Network, false) => network::tree_view(snap, h, self.context_target.as_deref()),
+                        (View::Network, true) => network::view(snap, h),
                         _ => detail_ui::empty(""),
                     }
                     None => detail_ui::empty("No person in tree. Open a DB with people."),

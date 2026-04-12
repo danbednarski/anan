@@ -1439,58 +1439,9 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let hamburger = button(
-            text(if self.sidebar_visible { "  \u{2715}  " } else { "  \u{2630}  " }).size(20)
-        )
-        .on_press(Message::ToggleSidebar)
-        .style(|_: &Theme, status| {
-            let bg = match status {
-                button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
-                _ => iced::Color::TRANSPARENT,
-            };
-            button::Style {
-                background: Some(iced::Background::Color(bg)),
-                text_color: crate::theme::TEXT,
-                border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
-                shadow: iced::Shadow::default(),
-            }
-        });
-
-        // View toggle: map (tree) vs list.
-        let is_tree = self.current == View::Tree;
-        let view_toggle = button(
-            // Grid icon for list, tree icon for map.
-            text(if is_tree { " \u{2637} " } else { " \u{229E} " }).size(18)
-        )
-        .on_press(if is_tree {
-            Message::ShowView(View::Persons)
-        } else {
-            Message::ShowView(View::Tree)
-        })
-        .style(|_: &Theme, status| {
-            let bg = match status {
-                button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
-                _ => iced::Color::TRANSPARENT,
-            };
-            button::Style {
-                background: Some(iced::Background::Color(bg)),
-                text_color: crate::theme::TEXT,
-                border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
-                shadow: iced::Shadow::default(),
-            }
-        });
-
-        // Inline search: icon that expands to a search bar.
-        let search_element: Element<'_, Message> = if self.search_bar_active {
-            text_input("Search people...", &self.search_bar_query)
-                .on_input(Message::SearchBarInput)
-                .on_submit(Message::SearchBarSubmit)
-                .padding(6)
-                .width(Length::Fixed(220.0))
-                .into()
-        } else {
-            button(text(" \u{1F50D} ").size(16))
-                .on_press(Message::SearchBarToggle)
+        let toolbar_btn = |label: &'static str, msg: Message| {
+            button(text(label).size(12))
+                .on_press(msg)
                 .style(|_: &Theme, status| {
                     let bg = match status {
                         button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
@@ -1499,22 +1450,39 @@ impl App {
                     button::Style {
                         background: Some(iced::Background::Color(bg)),
                         text_color: crate::theme::TEXT,
-                        border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
+                        border: iced::Border {
+                            color: iced::Color::TRANSPARENT,
+                            width: 0.0,
+                            radius: 4.0.into(),
+                        },
                         shadow: iced::Shadow::default(),
                     }
                 })
-                .into()
         };
 
-        let mut menu_bar = row![hamburger, view_toggle, search_element]
-            .spacing(8)
-            .padding([6, 12])
-            .align_y(Alignment::Center);
+        let menu_label = if self.sidebar_visible { "Close" } else { "Menu" };
+        let view_label = if self.current == View::Tree { "List" } else { "Tree" };
+        let view_msg = if self.current == View::Tree {
+            Message::ShowView(View::Persons)
+        } else {
+            Message::ShowView(View::Tree)
+        };
+
+        // Left padding to clear macOS traffic lights.
+        let mut menu_bar = row![
+            iced::widget::Space::with_width(Length::Fixed(68.0)),
+            toolbar_btn(menu_label, Message::ToggleSidebar),
+            toolbar_btn(view_label, view_msg),
+        ]
+        .spacing(6)
+        .padding([8, 12])
+        .align_y(Alignment::Center);
+
         if self.loading {
-            menu_bar = menu_bar.push(text("loading...").size(12).color(crate::theme::TEXT_MUTED));
+            menu_bar = menu_bar.push(text("loading...").size(11).color(crate::theme::TEXT_MUTED));
         }
         if self.saving {
-            menu_bar = menu_bar.push(text("saving...").size(12).color(crate::theme::TEXT_MUTED));
+            menu_bar = menu_bar.push(text("saving...").size(11).color(crate::theme::TEXT_MUTED));
         }
 
         let body: Element<'_, Message> = match &self.snapshot {
@@ -1616,6 +1584,16 @@ impl App {
 
     fn nav_column(&self) -> Element<'_, Message> {
         let mut col = column![].spacing(4).padding(12);
+
+        // Search bar - always visible at top of sidebar.
+        col = col.push(
+            text_input("Search people...", &self.search_bar_query)
+                .on_input(Message::SearchBarInput)
+                .on_submit(Message::SearchBarSubmit)
+                .padding(8)
+                .size(13),
+        );
+        col = col.push(text("").size(4));
 
         // Open DB button.
         col = col.push(

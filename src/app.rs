@@ -1484,7 +1484,17 @@ impl App {
             Some(snap) if matches!(self.current, View::Tree | View::Network) => {
                 let content_body = match &self.home_person {
                     Some(h) => match (self.current, self.list_mode) {
-                        (View::Tree, false) => tree::view(snap, h, None),
+                        (View::Tree, false) => {
+                            let canvas_el = canvas_tree::view(snap, h);
+                            scrollable(canvas_el)
+                                .direction(iced::widget::scrollable::Direction::Both {
+                                    horizontal: iced::widget::scrollable::Scrollbar::default(),
+                                    vertical: iced::widget::scrollable::Scrollbar::default(),
+                                })
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                                .into()
+                        }
                         (View::Tree, true) => tree::list_view(snap, h),
                         (View::Network, false) => {
                             // Canvas-based tree with curved Bezier lines.

@@ -20,7 +20,7 @@ use crate::views::widgets::date_display;
 
 // ---- layout constants --------------------------------------------------
 
-const CARD_W: f32 = 180.0;
+const CARD_W: f32 = 200.0;
 const CARD_H: f32 = 70.0;
 const CARD_R: f32 = 8.0;
 const COUPLE_GAP: f32 = 12.0;
@@ -416,6 +416,16 @@ impl canvas::Program<Message> for FamilyTreeProgram {
     }
 }
 
+/// Truncate text to fit within the card width.
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars - 1).collect();
+        format!("{truncated}...")
+    }
+}
+
 fn draw_card(frame: &mut Frame, card: &CardInfo) {
     let bg = if card.is_home { theme::HOME_BG } else { theme::CARD };
     let text_color = if card.is_home { Color::WHITE } else { theme::TEXT };
@@ -473,9 +483,9 @@ fn draw_card(frame: &mut Frame, card: &CardInfo) {
     );
     frame.fill(&strip, g_color);
 
-    // Name text.
+    // Name text (truncated to fit card).
     frame.fill_text(Text {
-        content: card.name.clone(),
+        content: truncate(&card.name, 24),
         position: Point::new(card.x + 12.0, card.y + 14.0),
         color: text_color,
         size: 13.0.into(),
@@ -485,7 +495,7 @@ fn draw_card(frame: &mut Frame, card: &CardInfo) {
     // Detail (birth/death).
     if !card.detail.is_empty() {
         frame.fill_text(Text {
-            content: card.detail.clone(),
+            content: truncate(&card.detail, 28),
             position: Point::new(card.x + 12.0, card.y + 32.0),
             color: if card.is_home {
                 Color::from_rgba(1.0, 1.0, 1.0, 0.7)

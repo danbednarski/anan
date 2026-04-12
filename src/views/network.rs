@@ -211,7 +211,7 @@ pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
 pub fn tree_view<'a>(
     snap: &'a Snapshot,
     home_handle: &str,
-    context_target: Option<&str>,
+    _context_target: Option<&str>,
 ) -> Element<'a, Message> {
     let groups = walk_network(snap, home_handle);
     let network_handles: HashSet<String> = groups.iter()
@@ -266,7 +266,7 @@ pub fn tree_view<'a>(
     let mut trees_row = row![].spacing(40).align_y(Alignment::Start);
     for fam_handle in &root_families {
         trees_row = trees_row.push(render_family(
-            snap, fam_handle, home_handle, context_target,
+            snap, fam_handle, home_handle, _context_target,
             &network_handles, 0,
         ));
     }
@@ -289,7 +289,7 @@ fn render_family(
     snap: &Snapshot,
     fam_handle: &str,
     home_handle: &str,
-    context_target: Option<&str>,
+    _context_target: Option<&str>,
     network: &HashSet<String>,
     depth: usize,
 ) -> Element<'static, Message> {
@@ -308,32 +308,31 @@ fn render_family(
         .and_then(|h| snap.person(h)).is_some();
 
     if let Some(father) = fam.father_handle.as_ref().and_then(|h| snap.person(h)) {
-        parents = parents.push(network_card(mk_info(father, snap, home_handle), context_target));
+        parents = parents.push(network_card(mk_info(father, snap, home_handle), father.gender));
     }
     if has_father && has_mother {
         parents = parents.push(couple_connector());
     }
     if let Some(mother) = fam.mother_handle.as_ref().and_then(|h| snap.person(h)) {
-        parents = parents.push(network_card(mk_info(mother, snap, home_handle), context_target));
+        parents = parents.push(network_card(mk_info(mother, snap, home_handle), mother.gender));
     }
     family_col = family_col.push(parents);
 
-    // Children.
+    // Children with bracket connector.
     let children: Vec<&crate::gramps::family::ChildRef> = fam.child_ref_list.iter()
         .filter(|cr| network.contains(&cr.r#ref))
         .collect();
 
     if !children.is_empty() {
+        // Vertical stem from parents down to bracket.
         family_col = family_col.push(vert_line());
 
-        let mut children_row = row![].spacing(16).align_y(Alignment::Start);
-        for cr in children {
+        // Build children elements first.
+        let mut child_elements: Vec<Element<'static, Message>> = Vec::new();
+        for cr in &children {
             let Some(child) = snap.person(&cr.r#ref) else { continue };
-
-            // Does this child have their own family (as parent)?
             let child_family = child.family_list.iter().find(|fh| {
                 snap.family(fh).map(|f| {
-                    // Family has at least one child or spouse in network.
                     f.child_ref_list.iter().any(|c| network.contains(&c.r#ref))
                         || f.mother_handle.as_ref().map(|h| network.contains(h)).unwrap_or(false)
                         || f.father_handle.as_ref().map(|h| network.contains(h)).unwrap_or(false)
@@ -341,19 +340,76 @@ fn render_family(
             }).cloned();
 
             if let Some(child_fam_handle) = child_family {
-                children_row = children_row.push(
-                    render_family(snap, &child_fam_handle, home_handle, context_target, network, depth + 1)
-                );
+                child_elements.push(render_family(
+                    snap, &child_fam_handle, home_handle, _context_target, network, depth + 1
+                ));
             } else {
-                children_row = children_row.push(
-                    network_card(mk_info(child, snap, home_handle), context_target)
-                );
+                child_elements.push(network_card(
+                    mk_info(child, snap, home_handle), child.gender,
+                ));
             }
         }
-        family_col = family_col.push(children_row);
+
+        if children.len() > 1 {
+            // Bracket: horizontal line spanning all children, then
+            // each child has a vertical drop from the bracket.
+            family_col = family_col.push(bracket_connector(child_elements));
+        } else {
+            // Single child - just a vertical line, no bracket needed.
+            let mut single_col = column![].align_x(Alignment::Center);
+            for el in child_elements {
+                single_col = single_col.push(el);
+            }
+            family_col = family_col.push(single_col);
+        }
     }
 
     family_col.into()
+}
+
+/// Render the bracket connector: a horizontal line with vertical
+/// drops to each child. Creates the classic family tree look:
+///
+/// ```text
+///     ─────────────────
+///     |       |       |
+///   [C1]    [C2]    [C3]
+/// ```
+fn bracket_connector(children: Vec<Element<'static, Message>>) -> Element<'static, Message> {
+    // Each child gets a vertical stub above it, then the card below.
+    let mut children_row = row![].spacing(20).align_y(Alignment::Start);
+    for child in children {
+        children_row = children_row.push(
+            column![
+                // Vertical drop from bracket to child.
+                container(text(""))
+                    .width(Length::Fixed(2.0))
+                    .height(Length::Fixed(14.0))
+                    .style(|_: &Theme| container::Style {
+                        background: Some(iced::Background::Color(theme::CONNECTOR)),
+                        ..Default::default()
+                    }),
+                child,
+            ]
+            .spacing(0)
+            .align_x(Alignment::Center),
+        );
+    }
+
+    // The horizontal bracket line spans the full width of the children.
+    column![
+        container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fixed(2.0))
+            .style(|_: &Theme| container::Style {
+                background: Some(iced::Background::Color(theme::CONNECTOR)),
+                ..Default::default()
+            }),
+        children_row,
+    ]
+    .spacing(0)
+    .align_x(Alignment::Center)
+    .into()
 }
 
 fn mk_info(person: &crate::gramps::Person, snap: &Snapshot, home_handle: &str) -> PersonInfo {
@@ -398,42 +454,60 @@ fn couple_connector() -> Element<'static, Message> {
         .into()
 }
 
+/// Gender colors for the left border accent (like Gramps Web).
+const MALE_COLOR: iced::Color = iced::Color::from_rgb(0.4, 0.6, 0.85);
+const FEMALE_COLOR: iced::Color = iced::Color::from_rgb(0.85, 0.45, 0.55);
+const UNKNOWN_COLOR: iced::Color = iced::Color::from_rgb(0.65, 0.65, 0.65);
+
+fn gender_color(gender: i32) -> iced::Color {
+    match gender {
+        0 => FEMALE_COLOR,
+        1 => MALE_COLOR,
+        _ => UNKNOWN_COLOR,
+    }
+}
+
 fn network_card(
     person: PersonInfo,
-    context_target: Option<&str>,
+    gender: i32,
 ) -> Element<'static, Message> {
     let is_home = person.is_home;
-    let show_menu = context_target == Some(person.handle.as_str());
+    let g_color = gender_color(gender);
 
     let mut card_col = column![
         text(person.name).size(13),
-    ]
-    .spacing(2);
+    ].spacing(2);
     if !person.birth.is_empty() {
         card_col = card_col.push(
-            text(person.birth)
-                .size(10)
-                .color(if is_home {
-                    iced::Color::from_rgba(1.0, 1.0, 1.0, 0.7)
-                } else {
-                    theme::TEXT_MUTED
-                }),
+            text(person.birth).size(10).color(
+                if is_home { iced::Color::from_rgba(1.0, 1.0, 1.0, 0.7) }
+                else { theme::TEXT_MUTED }
+            ),
         );
     }
     card_col = card_col.push(
-        text(person.gramps_id)
-            .size(9)
-            .color(if is_home {
-                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.5)
-            } else {
-                iced::Color::from_rgb(0.7, 0.7, 0.7)
-            }),
+        text(person.gramps_id).size(9).color(
+            if is_home { iced::Color::from_rgba(1.0, 1.0, 1.0, 0.5) }
+            else { iced::Color::from_rgb(0.7, 0.7, 0.7) }
+        ),
     );
 
+    // Gender accent: a colored strip on the left + the card content.
+    let gender_strip = container(text(""))
+        .width(Length::Fixed(4.0))
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(iced::Background::Color(g_color)),
+            ..Default::default()
+        });
+
+    let inner = row![gender_strip, container(card_col).padding([8, 12])]
+        .spacing(0)
+        .align_y(Alignment::Center);
+
     let handle = person.handle.clone();
-    let right_handle = person.handle.clone();
-    let menu_handle = person.handle;
-    let card = button(container(card_col).padding([8, 12]).width(Length::Shrink))
+    let right_handle = person.handle;
+    let card = button(inner)
         .on_press(Message::TreeHome(handle))
         .style(move |_: &Theme, status| {
             if is_home {
@@ -469,16 +543,9 @@ fn network_card(
             }
         });
 
-    let ma = mouse_area(card)
-        .on_right_press(Message::TreeContextMenu(right_handle));
-
-    if show_menu {
-        column![ma, super::tree::context_menu_widget(menu_handle)]
-            .spacing(4)
-            .align_x(Alignment::Center)
-            .into()
-    } else {
-        ma.into()
-    }
+    // Right-click for context menu (menu itself renders as overlay in app.rs).
+    mouse_area(card)
+        .on_right_press(Message::TreeContextMenu(right_handle))
+        .into()
 }
 

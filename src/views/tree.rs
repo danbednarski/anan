@@ -257,39 +257,20 @@ fn gen_header(label: &str) -> Element<'static, Message> {
 
 // ---- cards with inline context menu ------------------------------------
 
-/// Person card + optional inline context menu (if this person is the
-/// right-click target).
+/// Person card - context menu is now a floating overlay in app.rs.
 fn card_with_menu(
     node: TreeNode,
     is_home: bool,
-    context_target: Option<&str>,
+    _context_target: Option<&str>,
 ) -> Element<'static, Message> {
-    let show_menu = context_target == Some(node.handle.as_str());
-    let handle = node.handle.clone();
-
-    let mut wrapper = column![person_card(node, is_home)].spacing(4).align_x(Alignment::Center);
-
-    if show_menu {
-        wrapper = wrapper.push(context_menu_widget(handle));
-    }
-
-    wrapper.into()
+    person_card(node, is_home)
 }
 
 fn card_small_with_menu(
     node: TreeNode,
-    context_target: Option<&str>,
+    _context_target: Option<&str>,
 ) -> Element<'static, Message> {
-    let show_menu = context_target == Some(node.handle.as_str());
-    let handle = node.handle.clone();
-
-    let mut wrapper = column![person_card_small(node)].spacing(4).align_x(Alignment::Center);
-
-    if show_menu {
-        wrapper = wrapper.push(context_menu_widget(handle));
-    }
-
-    wrapper.into()
+    person_card_small(node)
 }
 
 /// The floating-style context menu rendered inline below the card.

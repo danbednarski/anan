@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, stack, text, text_input};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
 
 use crate::db::{repo as dbrepo, Database, Snapshot};
@@ -1484,29 +1484,39 @@ impl App {
             Some(snap) if matches!(self.current, View::Tree | View::Network) => {
                 let content_body = match &self.home_person {
                     Some(h) => match (self.current, self.list_mode) {
-                        // list_mode is absolute: false = tree/map, true = list.
-                        (View::Tree, false) => tree::view(snap, h, self.context_target.as_deref()),
+                        (View::Tree, false) => tree::view(snap, h, None),
                         (View::Tree, true) => tree::list_view(snap, h),
-                        (View::Network, false) => network::tree_view(snap, h, self.context_target.as_deref()),
+                        (View::Network, false) => network::tree_view(snap, h, None),
                         (View::Network, true) => network::view(snap, h),
                         _ => detail_ui::empty(""),
                     }
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };
-                let mut content_col = column![content_body]
-                    .width(Length::Fill)
-                    .height(Length::Fill);
+                // Use stack for overlays: context menu + modal float above tree.
+                let mut layers: Vec<Element<'_, Message>> = vec![content_body];
+
+                if let Some(target) = &self.context_target {
+                    let target_name = snap.person(target)
+                        .map(|p| p.primary_name.display())
+                        .unwrap_or_else(|| "?".to_string());
+                    layers.push(self.floating_context_menu(&target_name));
+                }
 
                 if let Some(add) = &self.pending_add {
-                    content_col = content_col.push(self.add_person_modal(add));
+                    layers.push(self.add_person_modal(add));
                 }
+
+                let content_stack: Element<'_, Message> = stack(layers)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into();
 
                 let mut main_row = row![].width(Length::Fill).height(Length::Fill);
                 if self.sidebar_visible {
                     main_row = main_row.push(self.nav_column());
                     main_row = main_row.push(vertical_separator());
                 }
-                main_row = main_row.push(content_col);
+                main_row = main_row.push(content_stack);
                 main_row.into()
             }
             Some(snap) => {
@@ -2050,6 +2060,70 @@ impl App {
         repository::recompute(snap, &mut self.repositories);
         tag::recompute(snap, &mut self.tags);
         search::recompute(snap, &mut self.search);
+    }
+
+    /// Floating context menu rendered as an overlay in the top-right
+    /// corner of the tree area. Does NOT push content - it layers on
+    /// top via stack.
+    fn floating_context_menu<'a>(&'a self, target_name: &str) -> Element<'a, Message> {
+        let menu_btn = |label: &'static str, msg: Message| {
+            button(text(label).size(12))
+                .on_press(msg)
+                .width(Length::Fill)
+                .style(|_: &Theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered | button::Status::Pressed => crate::theme::ANCESTOR_HOVER,
+                        _ => crate::theme::MENU_BG,
+                    };
+                    button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        text_color: crate::theme::TEXT,
+                        border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
+                        shadow: iced::Shadow::default(),
+                    }
+                })
+        };
+
+        let menu_card = container(
+            column![
+                text(target_name.to_string()).size(13).color(crate::theme::TEXT),
+                menu_btn("Add child", Message::TreeStartAdd(AddRelationship::Child)),
+                menu_btn("Add father", Message::TreeStartAdd(AddRelationship::Father)),
+                menu_btn("Add mother", Message::TreeStartAdd(AddRelationship::Mother)),
+                menu_btn("Add sibling", Message::TreeStartAdd(AddRelationship::Sibling)),
+                iced::widget::Space::with_height(4),
+                menu_btn("Center here", Message::TreeHome(
+                    self.context_target.clone().unwrap_or_default()
+                )),
+                menu_btn("Dismiss", Message::TreeDismissContext),
+            ]
+            .spacing(2)
+            .padding(10)
+            .width(Length::Fixed(180.0)),
+        )
+        .style(|_: &Theme| container::Style {
+            background: Some(iced::Background::Color(crate::theme::MENU_BG)),
+            border: iced::Border {
+                color: crate::theme::BORDER,
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        });
+
+        // Position in top-right corner with some padding.
+        container(menu_card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::End)
+            .align_y(Alignment::Start)
+            .padding([48, 16])
+            .into()
     }
 
     /// Modal overlay for the add-person form. Renders on top of the

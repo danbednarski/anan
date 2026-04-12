@@ -58,48 +58,140 @@ pub struct TreeLayout {
 
 // ---- layout algorithm --------------------------------------------------
 
-/// Build the full canvas layout for the network tree. Returns card
-/// positions and connection lines.
+/// Build the full canvas layout for the FULL NETWORK tree.
+/// Finds ALL root families (families where neither parent has a
+/// parent family in the network) and renders each as a separate tree.
 pub fn compute_layout(snap: &Snapshot, home_handle: &str) -> TreeLayout {
     let network_handles: HashSet<String> = {
         let groups = super::network::walk_network(snap, home_handle);
         groups.into_iter().flat_map(|(_, p)| p.into_iter().map(|pi| pi.handle)).collect()
     };
 
-    // Find root families (oldest gen).
-    let groups = super::network::walk_network(snap, home_handle);
-    let oldest_gen = groups.first().map(|(g, _)| *g).unwrap_or(0);
-
-    use std::collections::HashMap;
-    let mut gen_map: HashMap<String, i32> = HashMap::new();
-    for (gen, people) in &groups {
-        for p in people {
-            gen_map.insert(p.handle.clone(), *gen);
-        }
-    }
-
+    // Root families: families where NEITHER parent has a parent
+    // family that's also in the network. This catches all branches.
     let mut root_families: Vec<String> = Vec::new();
     for fam in &snap.families {
-        let father_gen = fam.father_handle.as_ref().and_then(|h| gen_map.get(h)).copied();
-        let mother_gen = fam.mother_handle.as_ref().and_then(|h| gen_map.get(h)).copied();
-        let parent_gen = match (father_gen, mother_gen) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        let any_member_in = fam.father_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
+            || fam.mother_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
+            || fam.child_ref_list.iter().any(|cr| network_handles.contains(&cr.r#ref));
+        if !any_member_in { continue; }
+
+        let parent_has_parents = |handle: &Option<String>| -> bool {
+            handle.as_ref()
+                .and_then(|h| snap.person(h))
+                .map(|p| p.parent_family_list.iter().any(|pfh| {
+                    snap.family(pfh).map(|pf| {
+                        pf.father_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
+                            || pf.mother_handle.as_ref().map(|h| network_handles.contains(h)).unwrap_or(false)
+                    }).unwrap_or(false)
+                }))
+                .unwrap_or(false)
         };
-        if parent_gen == Some(oldest_gen) {
+
+        if !parent_has_parents(&fam.father_handle) && !parent_has_parents(&fam.mother_handle) {
             root_families.push(fam.handle.clone());
         }
     }
 
+    build_from_roots(snap, home_handle, &network_handles, &root_families)
+}
+
+/// Build the canvas layout for the PERSONAL FAMILY TREE.
+/// Only includes direct ancestors and descendants of the home person,
+/// not in-laws, aunts, cousins, etc.
+pub fn compute_layout_personal(snap: &Snapshot, home_handle: &str) -> TreeLayout {
+    // Walk only direct lineage: ancestors up + descendants down.
+    let mut lineage: HashSet<String> = HashSet::new();
+    collect_ancestors(snap, home_handle, &mut lineage);
+    collect_descendants_handles(snap, home_handle, &mut lineage);
+    lineage.insert(home_handle.to_string());
+
+    // Also include spouses (needed for couple rendering).
+    let mut spouses: Vec<String> = Vec::new();
+    for handle in lineage.iter() {
+        if let Some(person) = snap.person(handle) {
+            for fh in &person.family_list {
+                if let Some(fam) = snap.family(fh) {
+                    if let Some(ref sh) = fam.father_handle {
+                        if sh != handle { spouses.push(sh.clone()); }
+                    }
+                    if let Some(ref sh) = fam.mother_handle {
+                        if sh != handle { spouses.push(sh.clone()); }
+                    }
+                }
+            }
+        }
+    }
+    for s in spouses { lineage.insert(s); }
+
+    // Find the root family: the oldest ancestor's parent family, or
+    // the home person's parent family if no deeper ancestors.
+    let mut root_families: Vec<String> = Vec::new();
+    for fam in &snap.families {
+        let any_member_in = fam.father_handle.as_ref().map(|h| lineage.contains(h)).unwrap_or(false)
+            || fam.mother_handle.as_ref().map(|h| lineage.contains(h)).unwrap_or(false);
+        if !any_member_in { continue; }
+
+        let parent_has_parents = |handle: &Option<String>| -> bool {
+            handle.as_ref()
+                .and_then(|h| snap.person(h))
+                .map(|p| p.parent_family_list.iter().any(|pfh| {
+                    snap.family(pfh).map(|pf| {
+                        pf.father_handle.as_ref().map(|h| lineage.contains(h)).unwrap_or(false)
+                            || pf.mother_handle.as_ref().map(|h| lineage.contains(h)).unwrap_or(false)
+                    }).unwrap_or(false)
+                }))
+                .unwrap_or(false)
+        };
+
+        if !parent_has_parents(&fam.father_handle) && !parent_has_parents(&fam.mother_handle) {
+            root_families.push(fam.handle.clone());
+        }
+    }
+
+    build_from_roots(snap, home_handle, &lineage, &root_families)
+}
+
+/// Walk ancestors recursively: person → parent_family → father/mother → recurse.
+fn collect_ancestors(snap: &Snapshot, handle: &str, out: &mut HashSet<String>) {
+    let Some(person) = snap.person(handle) else { return };
+    for pfh in &person.parent_family_list {
+        let Some(fam) = snap.family(pfh) else { continue };
+        if let Some(ref fh) = fam.father_handle {
+            if out.insert(fh.clone()) { collect_ancestors(snap, fh, out); }
+        }
+        if let Some(ref mh) = fam.mother_handle {
+            if out.insert(mh.clone()) { collect_ancestors(snap, mh, out); }
+        }
+    }
+}
+
+/// Walk descendants recursively: person → family_list → children → recurse.
+fn collect_descendants_handles(snap: &Snapshot, handle: &str, out: &mut HashSet<String>) {
+    let Some(person) = snap.person(handle) else { return };
+    for fh in &person.family_list {
+        let Some(fam) = snap.family(fh) else { continue };
+        for cr in &fam.child_ref_list {
+            if out.insert(cr.r#ref.clone()) {
+                collect_descendants_handles(snap, &cr.r#ref, out);
+            }
+        }
+    }
+}
+
+fn build_from_roots(
+    snap: &Snapshot,
+    home_handle: &str,
+    network: &HashSet<String>,
+    root_families: &[String],
+) -> TreeLayout {
     let mut cards: Vec<CardInfo> = Vec::new();
     let mut conns: Vec<Conn> = Vec::new();
     let mut x_offset: f32 = PADDING;
 
-    for fam_handle in &root_families {
+    for fam_handle in root_families {
         let w = layout_family(
-            snap, fam_handle, home_handle, &network_handles,
+            snap, fam_handle, home_handle, network,
             x_offset, PADDING, 0,
             &mut cards, &mut conns,
         );
@@ -112,8 +204,8 @@ pub fn compute_layout(snap: &Snapshot, home_handle: &str) -> TreeLayout {
     TreeLayout {
         cards,
         conns,
-        width: max_x,
-        height: max_y,
+        width: max_x.max(400.0),
+        height: max_y.max(300.0),
     }
 }
 
@@ -523,15 +615,23 @@ fn draw_card(frame: &mut Frame, card: &CardInfo) {
 
 // ---- public view function ----------------------------------------------
 
-/// Render the full network as a Canvas-based tree with curved Bezier
-/// connector lines.
+/// Render the full network as a Canvas-based tree.
 pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
     let layout = compute_layout(snap, home_handle);
+    render_layout(layout)
+}
+
+/// Render only the personal family tree (direct ancestors +
+/// descendants, no in-laws or extended family).
+pub fn view_personal<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
+    let layout = compute_layout_personal(snap, home_handle);
+    render_layout(layout)
+}
+
+fn render_layout(layout: TreeLayout) -> Element<'static, Message> {
     let w = layout.width;
     let h = layout.height;
-
     let program = FamilyTreeProgram { layout };
-
     iced::widget::canvas(program)
         .width(Length::Fixed(w))
         .height(Length::Fixed(h))

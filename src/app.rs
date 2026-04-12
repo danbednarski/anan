@@ -1485,7 +1485,7 @@ impl App {
                 let content_body = match &self.home_person {
                     Some(h) => match (self.current, self.list_mode) {
                         (View::Tree, false) => {
-                            let canvas_el = canvas_tree::view(snap, h);
+                            let canvas_el = canvas_tree::view_personal(snap, h);
                             scrollable(canvas_el)
                                 .direction(iced::widget::scrollable::Direction::Both {
                                     horizontal: iced::widget::scrollable::Scrollbar::default(),

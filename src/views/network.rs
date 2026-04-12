@@ -105,6 +105,7 @@ pub fn walk_network(snap: &Snapshot, home_handle: &str) -> Vec<(i32, Vec<PersonI
     sorted
 }
 
+#[derive(Clone)]
 pub struct PersonInfo {
     pub handle: String,
     pub name: String,
@@ -200,95 +201,53 @@ pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
 // Full Network as Tree: all BFS people rendered as card rows per gen
 // ====================================================================
 
-/// Render the full network as a family-grouped tree. Instead of flat
-/// generation rows, groups people into family units (couple + children)
-/// so the structure reads like a real family tree.
-///
-/// People who appear in multiple families (remarriage) are shown once
-/// as a full card, then as a smaller "(see above)" reference card in
-/// subsequent families to avoid duplication.
+/// Render the full network as generation rows with couples paired.
+/// Each generation is on the same horizontal level. Within each row,
+/// people who are partners in the same family are shown as
+/// `[A]--[B]` pairs. Everyone from the BFS walk is included.
 pub fn tree_view<'a>(
     snap: &'a Snapshot,
     home_handle: &str,
     context_target: Option<&str>,
 ) -> Element<'a, Message> {
-    // Collect all families where at least one member is in the network.
-    let network_handles: HashSet<String> = {
-        let groups = walk_network(snap, home_handle);
-        groups
-            .into_iter()
-            .flat_map(|(_, people)| people.into_iter().map(|p| p.handle))
-            .collect()
-    };
-
-    // Collect families that involve network members, sorted so the
-    // oldest generation appears first.
-    let mut family_units: Vec<FamilyUnit> = Vec::new();
-    let mut seen_families: HashSet<String> = HashSet::new();
-    for fam in &snap.families {
-        if seen_families.contains(&fam.handle) {
-            continue;
-        }
-        let father_in = fam
-            .father_handle
-            .as_ref()
-            .map(|h| network_handles.contains(h))
-            .unwrap_or(false);
-        let mother_in = fam
-            .mother_handle
-            .as_ref()
-            .map(|h| network_handles.contains(h))
-            .unwrap_or(false);
-        let any_child_in = fam
-            .child_ref_list
-            .iter()
-            .any(|cr| network_handles.contains(&cr.r#ref));
-        if father_in || mother_in || any_child_in {
-            seen_families.insert(fam.handle.clone());
-            let father = fam
-                .father_handle
-                .as_ref()
-                .and_then(|h| snap.person(h))
-                .map(|p| node_info(p, snap, home_handle));
-            let mother = fam
-                .mother_handle
-                .as_ref()
-                .and_then(|h| snap.person(h))
-                .map(|p| node_info(p, snap, home_handle));
-            let children: Vec<PersonInfo> = fam
-                .child_ref_list
-                .iter()
-                .filter(|cr| network_handles.contains(&cr.r#ref))
-                .filter_map(|cr| snap.person(&cr.r#ref))
-                .map(|p| node_info(p, snap, home_handle))
-                .collect();
-            family_units.push(FamilyUnit {
-                father,
-                mother,
-                children,
-            });
-        }
-    }
-
-    // Track which handles we've rendered as full cards.
-    let mut rendered: HashSet<String> = HashSet::new();
-    let total = network_handles.len();
+    let groups = walk_network(snap, home_handle);
+    let total: usize = groups.iter().map(|(_, v)| v.len()).sum();
 
     let mut col = column![
         text(format!("{total} people in your family network"))
             .size(16)
             .color(theme::TEXT),
     ]
-    .spacing(16)
+    .spacing(8)
     .padding(32)
     .align_x(Alignment::Center);
 
-    for unit in family_units {
-        col = col.push(render_family_unit(
-            unit,
-            context_target,
-            &mut rendered,
-        ));
+    for (gen, people) in groups {
+        let label = gen_label(gen);
+        col = col.push(
+            text(format!("{label}  ({} people)", people.len()))
+                .size(11)
+                .color(theme::ACCENT),
+        );
+
+        // Group people into couples and singles within this generation.
+        let clusters = cluster_couples(snap, &people);
+        let mut gen_row = row![].spacing(20).align_y(Alignment::Center);
+        for cluster in clusters {
+            match cluster {
+                Cluster::Couple(a, b) => {
+                    gen_row = gen_row.push(row![
+                        network_card(a, context_target),
+                        couple_connector(),
+                        network_card(b, context_target),
+                    ].spacing(0).align_y(Alignment::Center));
+                }
+                Cluster::Single(p) => {
+                    gen_row = gen_row.push(network_card(p, context_target));
+                }
+            }
+        }
+        col = col.push(gen_row);
         col = col.push(network_connector());
     }
 
@@ -306,115 +265,41 @@ pub fn tree_view<'a>(
         .into()
 }
 
-struct FamilyUnit {
-    father: Option<PersonInfo>,
-    mother: Option<PersonInfo>,
-    children: Vec<PersonInfo>,
+enum Cluster {
+    Couple(PersonInfo, PersonInfo),
+    Single(PersonInfo),
 }
 
-fn node_info(person: &crate::gramps::Person, snap: &Snapshot, home_handle: &str) -> PersonInfo {
-    let birth = if person.birth_ref_index >= 0 {
-        person
-            .event_ref_list
-            .get(person.birth_ref_index as usize)
-            .and_then(|er| snap.event(&er.r#ref))
-            .and_then(|e| e.date.as_ref())
-            .map(crate::views::widgets::date_display::format)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    PersonInfo {
-        handle: person.handle.clone(),
-        name: person.primary_name.display(),
-        gramps_id: person.gramps_id.clone(),
-        birth,
-        is_home: person.handle == home_handle,
-    }
-}
+/// Within a generation, find people who are couples (share a family
+/// as father+mother) and group them. Everyone else is a single.
+fn cluster_couples(snap: &Snapshot, people: &[PersonInfo]) -> Vec<Cluster> {
+    let handles: HashSet<&str> = people.iter().map(|p| p.handle.as_str()).collect();
+    let mut paired: HashSet<String> = HashSet::new();
+    let mut clusters: Vec<Cluster> = Vec::new();
 
-/// Render one family unit: couple on top, children below.
-fn render_family_unit(
-    unit: FamilyUnit,
-    context_target: Option<&str>,
-    rendered: &mut HashSet<String>,
-) -> Element<'static, Message> {
-    let mut family_col = column![].spacing(6).align_x(Alignment::Center);
-
-    // Parents row: father -- mother (or just one).
-    let has_both = unit.father.is_some() && unit.mother.is_some();
-    let mut parents_row = row![].spacing(0).align_y(Alignment::Center);
-    if let Some(father) = unit.father {
-        let is_dup = !rendered.insert(father.handle.clone());
-        if is_dup {
-            parents_row = parents_row.push(ref_card(&father));
-        } else {
-            parents_row = parents_row.push(network_card(father, context_target));
-        }
-    }
-    if has_both {
-        parents_row = parents_row.push(couple_connector());
-    }
-    if let Some(mother) = unit.mother {
-        let is_dup = !rendered.insert(mother.handle.clone());
-        if is_dup {
-            parents_row = parents_row.push(ref_card(&mother));
-        } else {
-            parents_row = parents_row.push(network_card(mother, context_target));
-        }
-    }
-    family_col = family_col.push(parents_row);
-
-    // Children row below.
-    if !unit.children.is_empty() {
-        family_col = family_col.push(network_connector());
-        let mut children_row = row![].spacing(10).align_y(Alignment::Start);
-        for child in unit.children {
-            let is_dup = !rendered.insert(child.handle.clone());
-            if is_dup {
-                children_row = children_row.push(ref_card(&child));
-            } else {
-                children_row = children_row.push(network_card(child, context_target));
+    // Scan families to find couples within this generation.
+    for fam in &snap.families {
+        let fh = fam.father_handle.as_deref().filter(|h| handles.contains(h));
+        let mh = fam.mother_handle.as_deref().filter(|h| handles.contains(h));
+        if let (Some(f), Some(m)) = (fh, mh) {
+            if !paired.contains(f) && !paired.contains(m) {
+                paired.insert(f.to_string());
+                paired.insert(m.to_string());
+                let fp = people.iter().find(|p| p.handle == f).unwrap().clone();
+                let mp = people.iter().find(|p| p.handle == m).unwrap().clone();
+                clusters.push(Cluster::Couple(fp, mp));
             }
         }
-        family_col = family_col.push(children_row);
     }
 
-    container(family_col)
-        .style(|_: &Theme| container::Style {
-            border: iced::Border {
-                color: theme::BORDER,
-                width: 0.5,
-                radius: 12.0.into(),
-            },
-            ..Default::default()
-        })
-        .padding(12)
-        .into()
-}
+    // Everyone not paired is a single.
+    for person in people {
+        if !paired.contains(&person.handle) {
+            clusters.push(Cluster::Single(person.clone()));
+        }
+    }
 
-/// Small reference card for a person who was already rendered above.
-fn ref_card(person: &PersonInfo) -> Element<'static, Message> {
-    let handle = person.handle.clone();
-    button(
-        container(
-            text(format!("{} *", person.name)).size(10).color(theme::TEXT_MUTED),
-        )
-        .padding([4, 8]),
-    )
-    .on_press(Message::TreeHome(handle))
-    .style(|_: &Theme, _status| button::Style {
-        background: None,
-        text_color: theme::TEXT_MUTED,
-        border: iced::Border {
-            color: theme::BORDER,
-            width: 1.0,
-            radius: 6.0.into(),
-        },
-        shadow: iced::Shadow::default(),
-    })
-    .into()
+    clusters
 }
 
 /// Short horizontal connector between a couple.

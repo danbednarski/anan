@@ -3,15 +3,16 @@
 //! Shows ancestors above, the home person + siblings + spouse in the
 //! center, and descendants below. The entire tree is scrollable in
 //! both directions for large families. Right-click any person card
-//! to open the context menu.
+//! to open a floating context menu next to that card.
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::{Alignment, Element, Length, Theme};
 
-use crate::app::Message;
+use crate::app::{AddRelationship, Message};
 use crate::db::Snapshot;
 use crate::gramps::Person;
+use crate::theme;
 use crate::views::widgets::date_display;
 
 const MAX_DEPTH: usize = 3;
@@ -34,82 +35,56 @@ pub struct AncestorNode {
 
 fn node_from_person(person: &Person, snap: &Snapshot) -> TreeNode {
     let birth = if person.birth_ref_index >= 0 {
-        person
-            .event_ref_list
-            .get(person.birth_ref_index as usize)
+        person.event_ref_list.get(person.birth_ref_index as usize)
             .and_then(|er| snap.event(&er.r#ref))
             .and_then(|e| e.date.as_ref())
             .map(date_display::format)
             .filter(|s| !s.is_empty())
-    } else {
-        None
-    };
+    } else { None };
     let death = if person.death_ref_index >= 0 {
-        person
-            .event_ref_list
-            .get(person.death_ref_index as usize)
+        person.event_ref_list.get(person.death_ref_index as usize)
             .and_then(|er| snap.event(&er.r#ref))
             .and_then(|e| e.date.as_ref())
             .map(date_display::format)
             .filter(|s| !s.is_empty())
-    } else {
-        None
-    };
+    } else { None };
     let years = match (birth, death) {
         (Some(b), Some(d)) => format!("{b} - {d}"),
         (Some(b), None) => format!("b. {b}"),
         (None, Some(d)) => format!("d. {d}"),
         (None, None) => String::new(),
     };
-    TreeNode {
-        handle: person.handle.clone(),
-        name: person.primary_name.display(),
-        gramps_id: person.gramps_id.clone(),
-        years,
-    }
+    TreeNode { handle: person.handle.clone(), name: person.primary_name.display(), gramps_id: person.gramps_id.clone(), years }
 }
 
 pub fn build_ancestors(snap: &Snapshot, handle: &str, depth: usize) -> Option<AncestorNode> {
     let person = snap.person(handle)?;
     let node = node_from_person(person, snap);
     if depth == 0 {
-        return Some(AncestorNode {
-            person: node,
-            father: None,
-            mother: None,
-        });
+        return Some(AncestorNode { person: node, father: None, mother: None });
     }
-    let (father, mother) = person
-        .parent_family_list
-        .first()
+    let (father, mother) = person.parent_family_list.first()
         .and_then(|fh| snap.family(fh))
         .map(|fam| {
-            let f = fam.father_handle.as_ref()
-                .and_then(|h| build_ancestors(snap, h, depth - 1))
-                .map(Box::new);
-            let m = fam.mother_handle.as_ref()
-                .and_then(|h| build_ancestors(snap, h, depth - 1))
-                .map(Box::new);
+            let f = fam.father_handle.as_ref().and_then(|h| build_ancestors(snap, h, depth - 1)).map(Box::new);
+            let m = fam.mother_handle.as_ref().and_then(|h| build_ancestors(snap, h, depth - 1)).map(Box::new);
             (f, m)
         })
         .unwrap_or((None, None));
     Some(AncestorNode { person: node, father, mother })
 }
 
-/// Siblings of the home person (other children of same parents).
 fn collect_siblings(snap: &Snapshot, home_handle: &str) -> Vec<TreeNode> {
     let Some(person) = snap.person(home_handle) else { return Vec::new() };
     let Some(fam_handle) = person.parent_family_list.first() else { return Vec::new() };
     let Some(fam) = snap.family(fam_handle) else { return Vec::new() };
-    fam.child_ref_list
-        .iter()
+    fam.child_ref_list.iter()
         .filter(|cr| cr.r#ref != home_handle)
         .filter_map(|cr| snap.person(&cr.r#ref))
         .map(|p| node_from_person(p, snap))
         .collect()
 }
 
-/// Spouses of the home person (the other parent in each of their families).
 fn collect_spouses(snap: &Snapshot, home_handle: &str) -> Vec<TreeNode> {
     let Some(person) = snap.person(home_handle) else { return Vec::new() };
     let mut spouses = Vec::new();
@@ -143,43 +118,30 @@ fn collect_children(snap: &Snapshot, handle: &str) -> Vec<TreeNode> {
     children
 }
 
-fn collect_descendants(
-    snap: &Snapshot,
-    handle: &str,
-    depth: usize,
-) -> Vec<(TreeNode, Vec<TreeNode>)> {
+fn collect_descendants(snap: &Snapshot, handle: &str, depth: usize) -> Vec<(TreeNode, Vec<TreeNode>)> {
     if depth == 0 { return Vec::new() }
-    collect_children(snap, handle)
-        .into_iter()
-        .map(|child| {
-            let gc = if depth > 1 { collect_children(snap, &child.handle) } else { Vec::new() };
-            (child, gc)
-        })
-        .collect()
+    collect_children(snap, handle).into_iter().map(|child| {
+        let gc = if depth > 1 { collect_children(snap, &child.handle) } else { Vec::new() };
+        (child, gc)
+    }).collect()
 }
 
-fn collect_generation_nodes(
-    node: &AncestorNode,
-    current_depth: usize,
-    max_depth: usize,
-    layers: &mut Vec<Vec<TreeNode>>,
-) {
-    while layers.len() <= current_depth {
-        layers.push(Vec::new());
-    }
-    layers[current_depth].push(node.person.clone());
-    if current_depth < max_depth {
-        if let Some(f) = &node.father {
-            collect_generation_nodes(f, current_depth + 1, max_depth, layers);
-        }
-        if let Some(m) = &node.mother {
-            collect_generation_nodes(m, current_depth + 1, max_depth, layers);
-        }
+fn collect_generation_nodes(node: &AncestorNode, depth: usize, max: usize, layers: &mut Vec<Vec<TreeNode>>) {
+    while layers.len() <= depth { layers.push(Vec::new()); }
+    layers[depth].push(node.person.clone());
+    if depth < max {
+        if let Some(f) = &node.father { collect_generation_nodes(f, depth + 1, max, layers); }
+        if let Some(m) = &node.mother { collect_generation_nodes(m, depth + 1, max, layers); }
     }
 }
 
-/// Render the full tree with pan/scroll in both directions.
-pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
+/// Render the full tree. `context_target` is the handle of the person
+/// whose inline context menu should be shown (from right-click).
+pub fn view<'a>(
+    snap: &'a Snapshot,
+    home_handle: &str,
+    context_target: Option<&str>,
+) -> Element<'a, Message> {
     let ancestors = build_ancestors(snap, home_handle, MAX_DEPTH);
     let descendants = collect_descendants(snap, home_handle, MAX_DESC_DEPTH);
     let siblings = collect_siblings(snap, home_handle);
@@ -187,14 +149,12 @@ pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
 
     let Some(tree) = ancestors else {
         return container(text("Home person not found in tree.").size(16))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
+            .width(Length::Fill).height(Length::Fill)
+            .center_x(Length::Fill).center_y(Length::Fill)
             .into();
     };
 
-    let mut col = column![].spacing(4).padding(24).align_x(Alignment::Center);
+    let mut col = column![].spacing(6).padding(32).align_x(Alignment::Center);
 
     // Ancestor generations.
     let mut layers: Vec<Vec<TreeNode>> = Vec::new();
@@ -209,49 +169,37 @@ pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
             3 => "Great-grandparents".to_string(),
             n => format!("{n}x great-grandparents"),
         };
-        let mut r = row![].spacing(12).align_y(Alignment::Center);
+        let mut r = row![].spacing(16).align_y(Alignment::Start);
         for node in layer {
-            r = r.push(person_card(node, false));
+            r = r.push(card_with_menu(node, false, context_target));
         }
-        col = col.push(
-            column![
-                text(gen_label).size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-                r,
-            ]
-            .spacing(4)
-            .align_x(Alignment::Center),
-        );
-        col = col.push(connector_vertical());
+        col = col.push(gen_header(&gen_label));
+        col = col.push(r);
+        col = col.push(connector_v());
     }
 
     // Home row: siblings + HOME + spouse.
-    let mut home_row = row![].spacing(12).align_y(Alignment::Center);
+    let mut home_row = row![].spacing(16).align_y(Alignment::Center);
 
     if !siblings.is_empty() {
-        let mut sib_col = column![
-            text("Siblings").size(10).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        ].spacing(4).align_x(Alignment::Center);
-        let mut sib_row = row![].spacing(8);
+        let mut sib_items = row![].spacing(8).align_y(Alignment::Start);
         for sib in siblings {
-            sib_row = sib_row.push(person_card(sib, false));
+            sib_items = sib_items.push(card_with_menu(sib, false, context_target));
         }
-        sib_col = sib_col.push(sib_row);
-        home_row = home_row.push(sib_col);
-        home_row = home_row.push(connector_horizontal());
+        home_row = home_row.push(
+            column![gen_header("Siblings"), sib_items].spacing(4).align_x(Alignment::Center)
+        );
+        home_row = home_row.push(connector_h());
     }
 
-    home_row = home_row.push(person_card(tree.person, true));
+    home_row = home_row.push(card_with_menu(tree.person, true, context_target));
 
     if !spouses.is_empty() {
-        home_row = home_row.push(connector_horizontal());
         for sp in spouses {
+            home_row = home_row.push(connector_h());
             home_row = home_row.push(
-                column![
-                    text("Spouse").size(10).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-                    person_card(sp, false),
-                ]
-                .spacing(4)
-                .align_x(Alignment::Center),
+                column![gen_header("Spouse"), card_with_menu(sp, false, context_target)]
+                    .spacing(4).align_x(Alignment::Center)
             );
         }
     }
@@ -260,122 +208,200 @@ pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
 
     // Descendants.
     if !descendants.is_empty() {
-        col = col.push(connector_vertical());
-        let mut children_row = row![].spacing(12).align_y(Alignment::Start);
+        col = col.push(connector_v());
+        col = col.push(gen_header("Children"));
+        let mut children_row = row![].spacing(16).align_y(Alignment::Start);
         for (child, grandchildren) in descendants {
-            let mut child_col = column![person_card(child, false)]
-                .spacing(6)
-                .align_x(Alignment::Center);
+            let mut child_col = column![card_with_menu(child, false, context_target)]
+                .spacing(6).align_x(Alignment::Center);
             if !grandchildren.is_empty() {
-                child_col = child_col.push(connector_vertical_small());
-                let mut gc_row = row![].spacing(6);
+                child_col = child_col.push(connector_v_small());
+                let mut gc_row = row![].spacing(8);
                 for gc in grandchildren {
-                    gc_row = gc_row.push(person_card_small(gc));
+                    gc_row = gc_row.push(card_small_with_menu(gc, context_target));
                 }
                 child_col = child_col.push(gc_row);
             }
             children_row = children_row.push(child_col);
         }
-        col = col.push(
-            column![
-                text("Children").size(11).color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-                children_row,
-            ]
-            .spacing(4)
-            .align_x(Alignment::Center),
-        );
+        col = col.push(children_row);
     }
 
-    // Wrap in a bi-directional scrollable for large trees.
-    // Content must be Shrink width so horizontal scroll works.
-    let scroll = scrollable(
-        container(col)
-            .width(Length::Shrink)
-            .padding([0, 40]),
-    )
-    .direction(Direction::Both {
-        horizontal: Scrollbar::default(),
-        vertical: Scrollbar::default(),
-    })
-    .width(Length::Fill)
-    .height(Length::Fill);
-
-    container(scroll)
+    let scroll = scrollable(container(col).width(Length::Shrink).padding([0, 40]))
+        .direction(Direction::Both {
+            horizontal: Scrollbar::default(),
+            vertical: Scrollbar::default(),
+        })
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Fill);
+
+    container(scroll).width(Length::Fill).height(Length::Fill).into()
+}
+
+// ---- generation header -------------------------------------------------
+
+fn gen_header(label: &str) -> Element<'static, Message> {
+    text(label.to_string())
+        .size(11)
+        .color(theme::TEXT_MUTED)
         .into()
 }
 
-// ---- visual connectors ------------------------------------------------
+// ---- cards with inline context menu ------------------------------------
 
-fn connector_vertical() -> Element<'static, Message> {
+/// Person card + optional inline context menu (if this person is the
+/// right-click target).
+fn card_with_menu(
+    node: TreeNode,
+    is_home: bool,
+    context_target: Option<&str>,
+) -> Element<'static, Message> {
+    let show_menu = context_target == Some(node.handle.as_str());
+    let handle = node.handle.clone();
+
+    let mut wrapper = column![person_card(node, is_home)].spacing(4).align_x(Alignment::Center);
+
+    if show_menu {
+        wrapper = wrapper.push(context_menu(handle));
+    }
+
+    wrapper.into()
+}
+
+fn card_small_with_menu(
+    node: TreeNode,
+    context_target: Option<&str>,
+) -> Element<'static, Message> {
+    let show_menu = context_target == Some(node.handle.as_str());
+    let handle = node.handle.clone();
+
+    let mut wrapper = column![person_card_small(node)].spacing(4).align_x(Alignment::Center);
+
+    if show_menu {
+        wrapper = wrapper.push(context_menu(handle));
+    }
+
+    wrapper.into()
+}
+
+/// The floating-style context menu rendered inline below the card.
+fn context_menu(handle: String) -> Element<'static, Message> {
+    let menu_btn = |label: &str, msg: Message| {
+        button(
+            text(label.to_string()).size(12)
+        )
+        .on_press(msg)
+        .width(Length::Fill)
+        .style(|_theme: &Theme, status| {
+            let bg = match status {
+                button::Status::Hovered | button::Status::Pressed => theme::ANCESTOR_HOVER,
+                _ => theme::MENU_BG,
+            };
+            button::Style {
+                background: Some(iced::Background::Color(bg)),
+                text_color: theme::TEXT,
+                border: iced::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: 4.0.into() },
+                shadow: iced::Shadow::default(),
+            }
+        })
+    };
+
+    let menu = container(
+        column![
+            menu_btn("Add child", Message::TreeStartAdd(AddRelationship::Child)),
+            menu_btn("Add father", Message::TreeStartAdd(AddRelationship::Father)),
+            menu_btn("Add mother", Message::TreeStartAdd(AddRelationship::Mother)),
+            menu_btn("Add sibling", Message::TreeStartAdd(AddRelationship::Sibling)),
+            Space::with_height(4),
+            menu_btn("Center on this person", Message::TreeHome(handle.clone())),
+            Space::with_height(4),
+            menu_btn("Dismiss", Message::TreeDismissContext),
+        ]
+        .spacing(2)
+        .padding(6)
+        .width(Length::Fixed(180.0)),
+    )
+    .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Background::Color(theme::MENU_BG)),
+        border: iced::Border {
+            color: theme::BORDER,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.15),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
+        ..Default::default()
+    });
+
+    menu.into()
+}
+
+// ---- connectors --------------------------------------------------------
+
+fn connector_v() -> Element<'static, Message> {
     container(text(""))
         .width(Length::Fixed(2.0))
-        .height(Length::Fixed(20.0))
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(iced::Background::Color(palette.background.strong.color)),
-                ..Default::default()
-            }
+        .height(Length::Fixed(18.0))
+        .style(|_: &Theme| container::Style {
+            background: Some(iced::Background::Color(theme::CONNECTOR)),
+            ..Default::default()
         })
         .into()
 }
 
-fn connector_vertical_small() -> Element<'static, Message> {
+fn connector_v_small() -> Element<'static, Message> {
     container(text(""))
         .width(Length::Fixed(1.0))
-        .height(Length::Fixed(12.0))
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(iced::Background::Color(palette.background.strong.color)),
-                ..Default::default()
-            }
+        .height(Length::Fixed(10.0))
+        .style(|_: &Theme| container::Style {
+            background: Some(iced::Background::Color(theme::CONNECTOR)),
+            ..Default::default()
         })
         .into()
 }
 
-fn connector_horizontal() -> Element<'static, Message> {
+fn connector_h() -> Element<'static, Message> {
     container(text(""))
-        .width(Length::Fixed(24.0))
+        .width(Length::Fixed(20.0))
         .height(Length::Fixed(2.0))
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(iced::Background::Color(palette.background.strong.color)),
-                ..Default::default()
-            }
+        .style(|_: &Theme| container::Style {
+            background: Some(iced::Background::Color(theme::CONNECTOR)),
+            ..Default::default()
         })
         .into()
 }
 
-// ---- person cards ------------------------------------------------------
+// ---- person cards with themed styling ----------------------------------
 
 fn person_card(node: TreeNode, is_home: bool) -> Element<'static, Message> {
-    let name_size = if is_home { 20 } else { 14 };
-    let years_size = if is_home { 14 } else { 11 };
-    let padding = if is_home { [16, 24] } else { [10, 16] };
+    let name_size: u16 = if is_home { 18 } else { 13 };
+    let years_size: u16 = if is_home { 13 } else { 10 };
+    let padding: [u16; 2] = if is_home { [14, 20] } else { [10, 14] };
 
-    let mut col = column![text(node.name).size(name_size)].spacing(2);
+    let mut col = column![
+        text(node.name).size(name_size),
+    ].spacing(2);
     if !node.years.is_empty() {
-        col = col.push(
-            text(node.years)
-                .size(years_size)
-                .color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
-        );
+        col = col.push(text(node.years).size(years_size).color(
+            if is_home { iced::Color::from_rgba(1.0, 1.0, 1.0, 0.75) }
+            else { theme::TEXT_MUTED }
+        ));
     }
-    col = col.push(
-        text(node.gramps_id)
-            .size(10)
-            .color(iced::Color::from_rgb(0.6, 0.6, 0.6)),
-    );
+    col = col.push(text(node.gramps_id).size(9).color(
+        if is_home { iced::Color::from_rgba(1.0, 1.0, 1.0, 0.5) }
+        else { iced::Color::from_rgb(0.7, 0.7, 0.7) }
+    ));
 
     let handle = node.handle.clone();
     let right_handle = node.handle;
     let card = button(container(col).padding(padding).width(Length::Shrink))
         .on_press(Message::TreeHome(handle))
-        .style(move |theme: &Theme, status| card_style(theme, status, is_home));
+        .style(move |_theme: &Theme, status| {
+            if is_home { home_card_style(status) } else { ancestor_card_style(status) }
+        });
 
     mouse_area(card)
         .on_right_press(Message::TreeContextMenu(right_handle))
@@ -385,63 +411,58 @@ fn person_card(node: TreeNode, is_home: bool) -> Element<'static, Message> {
 fn person_card_small(node: TreeNode) -> Element<'static, Message> {
     let col = column![
         text(node.name).size(11),
-        text(node.years)
-            .size(9)
-            .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-    ]
-    .spacing(2);
+        text(node.years).size(8).color(theme::TEXT_MUTED),
+    ].spacing(1);
 
     let handle = node.handle.clone();
     let right_handle = node.handle;
     let card = button(container(col).padding([6, 10]))
         .on_press(Message::TreeHome(handle))
-        .style(|theme: &Theme, status| card_style(theme, status, false));
+        .style(|_: &Theme, status| ancestor_card_style(status));
 
     mouse_area(card)
         .on_right_press(Message::TreeContextMenu(right_handle))
         .into()
 }
 
-fn card_style(theme: &Theme, status: button::Status, is_home: bool) -> button::Style {
-    let palette = theme.extended_palette();
-    let bg = if is_home {
-        palette.primary.weak.color
-    } else {
-        palette.background.weak.color
+fn home_card_style(status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => theme::HOME_HOVER,
+        _ => theme::HOME_BG,
     };
-    let text_color = if is_home {
-        palette.primary.weak.text
-    } else {
-        palette.background.base.text
-    };
-    let base = button::Style {
+    button::Style {
         background: Some(iced::Background::Color(bg)),
-        text_color,
+        text_color: iced::Color::WHITE,
         border: iced::Border {
-            color: if is_home {
-                palette.primary.base.color
-            } else {
-                palette.background.strong.color
-            },
-            width: if is_home { 2.0 } else { 1.0 },
+            color: theme::PRIMARY,
+            width: 2.0,
+            radius: 10.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.12),
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+    }
+}
+
+fn ancestor_card_style(status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => theme::ANCESTOR_HOVER,
+        _ => theme::ANCESTOR_BG,
+    };
+    button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: theme::TEXT,
+        border: iced::Border {
+            color: theme::BORDER,
+            width: 1.0,
             radius: 8.0.into(),
         },
-        shadow: iced::Shadow::default(),
-    };
-    match status {
-        button::Status::Hovered | button::Status::Pressed => button::Style {
-            background: Some(iced::Background::Color(if is_home {
-                palette.primary.base.color
-            } else {
-                palette.background.strong.color
-            })),
-            text_color: if is_home {
-                palette.primary.base.text
-            } else {
-                text_color
-            },
-            ..base
+        shadow: iced::Shadow {
+            color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.06),
+            offset: iced::Vector::new(0.0, 1.0),
+            blur_radius: 4.0,
         },
-        _ => base,
     }
 }

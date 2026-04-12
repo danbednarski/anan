@@ -22,6 +22,7 @@ pub mod person;
 pub mod place;
 pub mod repository;
 pub mod search;
+pub mod network;
 pub mod source;
 pub mod tag;
 pub mod tree;

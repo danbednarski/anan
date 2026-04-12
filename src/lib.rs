@@ -7,4 +7,5 @@
 pub mod app;
 pub mod db;
 pub mod gramps;
+pub mod theme;
 pub mod views;

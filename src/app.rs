@@ -34,8 +34,8 @@ use crate::db::{repo as dbrepo, Database, Snapshot};
 use crate::views::list_pane::ListState;
 use crate::views::search::{SearchHit, SearchState};
 use crate::views::{
-    citation, detail_ui, event, family, media, note, person, place, repository, search, source,
-    tag, tree,
+    citation, detail_ui, event, family, media, network, note, person, place, repository, search,
+    source, tag, tree,
 };
 
 /// Stable id for the search `text_input` so ⌘F can focus it.
@@ -46,6 +46,7 @@ pub const SEARCH_INPUT_ID: &str = "search-input";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Tree,
+    Network,
     Persons,
     Families,
     Events,
@@ -60,11 +61,9 @@ pub enum View {
 }
 
 impl View {
-    /// Primary nav items shown in the sidebar. The list views still
-    /// exist and work but are tucked under Browse so the tree is the
-    /// hero experience.
     const NAV_ITEMS: &'static [View] = &[
         View::Tree,
+        View::Network,
         View::Search,
     ];
 
@@ -86,6 +85,7 @@ impl View {
     fn label(self) -> &'static str {
         match self {
             View::Tree => "Family Tree",
+            View::Network => "Full Network",
             View::Persons => "Persons",
             View::Families => "Families",
             View::Events => "Events",
@@ -567,7 +567,7 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Light
+        crate::theme::gramps_theme()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1403,7 +1403,11 @@ impl App {
         let body: Element<'_, Message> = match &self.snapshot {
             Some(snap) if self.current == View::Tree => {
                 let tree_body = match &self.home_person {
-                    Some(h) => tree::view(snap, h),
+                    Some(h) => tree::view(
+                        snap,
+                        h,
+                        self.context_target.as_deref(),
+                    ),
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };
                 let context_bar = self.tree_context_bar(snap);
@@ -1421,6 +1425,19 @@ impl App {
                     main_row = main_row.push(vertical_separator());
                 }
                 main_row = main_row.push(tree_col);
+                main_row.into()
+            }
+            Some(snap) if self.current == View::Network => {
+                let net_body = match &self.home_person {
+                    Some(h) => network::view(snap, h),
+                    None => detail_ui::empty("No person loaded."),
+                };
+                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
+                if self.sidebar_visible {
+                    main_row = main_row.push(self.nav_column());
+                    main_row = main_row.push(vertical_separator());
+                }
+                main_row = main_row.push(net_body);
                 main_row.into()
             }
             Some(snap) => {
@@ -1521,7 +1538,7 @@ impl App {
 
     fn list_pane<'a>(&'a self, snap: &'a Snapshot) -> Element<'a, Message> {
         match self.current {
-            View::Tree => detail_ui::empty(""),
+            View::Tree | View::Network => detail_ui::empty(""),
             View::Persons => person::list_view(snap, &self.persons),
             View::Families => family::list_view(snap, &self.families),
             View::Events => event::list_view(snap, &self.events),
@@ -1573,7 +1590,7 @@ impl App {
 
         let placeholder = || detail_ui::empty("Select a row to see details");
         match self.current {
-            View::Tree => detail_ui::empty(""),
+            View::Tree | View::Network => detail_ui::empty(""),
             View::Persons => match self.persons.selected_item() {
                 Some(i) => snap
                     .persons
@@ -1855,9 +1872,9 @@ impl App {
 
     fn current_list_state_mut(&mut self) -> &mut ListState {
         match self.current {
-            // Tree doesn't use a ListState; fall through to persons as
-            // a harmless default (tree messages don't go through this path).
-            View::Tree => &mut self.persons,
+            // Tree/Network don't use a ListState; fall through to persons
+            // as a harmless default (their messages don't go through this).
+            View::Tree | View::Network => &mut self.persons,
             View::Persons => &mut self.persons,
             View::Families => &mut self.families,
             View::Events => &mut self.events,
@@ -1881,7 +1898,7 @@ impl App {
             return;
         };
         match self.current {
-            View::Tree => {} // no list state to recompute
+            View::Tree | View::Network => {}
             View::Persons => person::recompute(snap, &mut self.persons),
             View::Families => family::recompute(snap, &mut self.families),
             View::Events => event::recompute(snap, &mut self.events),
@@ -2107,7 +2124,7 @@ impl App {
             return 0;
         };
         match view {
-            View::Tree => snap.persons.len(),
+            View::Tree | View::Network => snap.persons.len(),
             View::Persons => snap.persons.len(),
             View::Families => snap.families.len(),
             View::Events => snap.events.len(),

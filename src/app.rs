@@ -637,8 +637,6 @@ impl App {
             }
             Message::ShowView(view) => {
                 self.current = view;
-                // Reset display mode to each view's natural default.
-                self.list_mode = false;
                 Task::none()
             }
             Message::SearchChanged(q) => {
@@ -1491,7 +1489,7 @@ impl App {
                         (View::Tree, true) => tree::list_view(snap, h),
                         // Full Network: default = flat list, toggle = extended tree with aunts/uncles
                         (View::Network, false) => network::view(snap, h),
-                        (View::Network, true) => tree::view_extended(snap, h, self.context_target.as_deref()),
+                        (View::Network, true) => network::tree_view(snap, h, self.context_target.as_deref()),
                         _ => detail_ui::empty(""),
                     }
                     None => detail_ui::empty("No person in tree. Open a DB with people."),

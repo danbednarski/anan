@@ -12,8 +12,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use iced::widget::{button, column, container, scrollable, text};
-use iced::{Element, Length, Theme};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
+use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::db::Snapshot;
@@ -23,7 +24,7 @@ use crate::views::widgets::date_display;
 /// Walk all family links from `home_handle` and return every reachable
 /// person grouped by generation distance. Negative = ancestor
 /// direction, positive = descendant direction, 0 = home's generation.
-fn walk_network(snap: &Snapshot, home_handle: &str) -> Vec<(i32, Vec<PersonInfo>)> {
+pub fn walk_network(snap: &Snapshot, home_handle: &str) -> Vec<(i32, Vec<PersonInfo>)> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut generation: HashMap<String, i32> = HashMap::new();
     let mut queue: VecDeque<(String, i32)> = VecDeque::new();
@@ -104,12 +105,12 @@ fn walk_network(snap: &Snapshot, home_handle: &str) -> Vec<(i32, Vec<PersonInfo>
     sorted
 }
 
-struct PersonInfo {
-    handle: String,
-    name: String,
-    gramps_id: String,
-    birth: String,
-    is_home: bool,
+pub struct PersonInfo {
+    pub handle: String,
+    pub name: String,
+    pub gramps_id: String,
+    pub birth: String,
+    pub is_home: bool,
 }
 
 fn gen_label(gen: i32) -> String {
@@ -192,5 +193,156 @@ pub fn view<'a>(snap: &'a Snapshot, home_handle: &str) -> Element<'a, Message> {
     container(scrollable(col).height(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
+        .into()
+}
+
+// ====================================================================
+// Full Network as Tree: all BFS people rendered as card rows per gen
+// ====================================================================
+
+/// Render every person in the full network as person cards grouped
+/// by generation - the "tree view" of the full network. Uses the
+/// same BFS walk as the list view, so no one is missing.
+pub fn tree_view<'a>(
+    snap: &'a Snapshot,
+    home_handle: &str,
+    context_target: Option<&str>,
+) -> Element<'a, Message> {
+    let groups = walk_network(snap, home_handle);
+    let total: usize = groups.iter().map(|(_, v)| v.len()).sum();
+
+    let mut col = column![
+        text(format!("{total} people in your family network")).size(16).color(theme::TEXT),
+    ]
+    .spacing(12)
+    .padding(32)
+    .align_x(Alignment::Center);
+
+    for (gen, people) in groups {
+        let label = gen_label(gen);
+
+        col = col.push(
+            text(format!("{label}  ({} people)", people.len()))
+                .size(11)
+                .color(theme::ACCENT),
+        );
+
+        let mut cards_row = row![].spacing(12).align_y(Alignment::Start);
+        for person in people {
+            cards_row = cards_row.push(network_card(
+                person,
+                context_target,
+            ));
+        }
+        col = col.push(cards_row);
+        col = col.push(network_connector());
+    }
+
+    let scroll = scrollable(container(col).width(Length::Shrink).padding([0, 40]))
+        .direction(Direction::Both {
+            horizontal: Scrollbar::default(),
+            vertical: Scrollbar::default(),
+        })
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    container(scroll)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn network_card(
+    person: PersonInfo,
+    context_target: Option<&str>,
+) -> Element<'static, Message> {
+    let is_home = person.is_home;
+    let show_menu = context_target == Some(person.handle.as_str());
+
+    let mut card_col = column![
+        text(person.name).size(13),
+    ]
+    .spacing(2);
+    if !person.birth.is_empty() {
+        card_col = card_col.push(
+            text(person.birth)
+                .size(10)
+                .color(if is_home {
+                    iced::Color::from_rgba(1.0, 1.0, 1.0, 0.7)
+                } else {
+                    theme::TEXT_MUTED
+                }),
+        );
+    }
+    card_col = card_col.push(
+        text(person.gramps_id)
+            .size(9)
+            .color(if is_home {
+                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.5)
+            } else {
+                iced::Color::from_rgb(0.7, 0.7, 0.7)
+            }),
+    );
+
+    let handle = person.handle.clone();
+    let right_handle = person.handle.clone();
+    let menu_handle = person.handle;
+    let card = button(container(card_col).padding([8, 12]).width(Length::Shrink))
+        .on_press(Message::TreeHome(handle))
+        .style(move |_: &Theme, status| {
+            if is_home {
+                let bg = match status {
+                    button::Status::Hovered | button::Status::Pressed => theme::HOME_HOVER,
+                    _ => theme::HOME_BG,
+                };
+                button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    text_color: iced::Color::WHITE,
+                    border: iced::Border { color: theme::PRIMARY, width: 2.0, radius: 8.0.into() },
+                    shadow: iced::Shadow {
+                        color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.1),
+                        offset: iced::Vector::new(0.0, 2.0),
+                        blur_radius: 6.0,
+                    },
+                }
+            } else {
+                let bg = match status {
+                    button::Status::Hovered | button::Status::Pressed => theme::ANCESTOR_HOVER,
+                    _ => theme::ANCESTOR_BG,
+                };
+                button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    text_color: theme::TEXT,
+                    border: iced::Border { color: theme::BORDER, width: 1.0, radius: 8.0.into() },
+                    shadow: iced::Shadow {
+                        color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.05),
+                        offset: iced::Vector::new(0.0, 1.0),
+                        blur_radius: 3.0,
+                    },
+                }
+            }
+        });
+
+    let ma = mouse_area(card)
+        .on_right_press(Message::TreeContextMenu(right_handle));
+
+    if show_menu {
+        column![ma, super::tree::context_menu_widget(menu_handle)]
+            .spacing(4)
+            .align_x(Alignment::Center)
+            .into()
+    } else {
+        ma.into()
+    }
+}
+
+fn network_connector() -> Element<'static, Message> {
+    container(text(""))
+        .width(Length::Fixed(2.0))
+        .height(Length::Fixed(14.0))
+        .style(|_: &Theme| container::Style {
+            background: Some(iced::Background::Color(theme::CONNECTOR)),
+            ..Default::default()
+        })
         .into()
 }

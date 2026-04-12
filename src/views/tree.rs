@@ -270,7 +270,7 @@ fn card_with_menu(
     let mut wrapper = column![person_card(node, is_home)].spacing(4).align_x(Alignment::Center);
 
     if show_menu {
-        wrapper = wrapper.push(context_menu(handle));
+        wrapper = wrapper.push(context_menu_widget(handle));
     }
 
     wrapper.into()
@@ -286,14 +286,15 @@ fn card_small_with_menu(
     let mut wrapper = column![person_card_small(node)].spacing(4).align_x(Alignment::Center);
 
     if show_menu {
-        wrapper = wrapper.push(context_menu(handle));
+        wrapper = wrapper.push(context_menu_widget(handle));
     }
 
     wrapper.into()
 }
 
 /// The floating-style context menu rendered inline below the card.
-fn context_menu(handle: String) -> Element<'static, Message> {
+/// Public so network::tree_view can reuse it.
+pub fn context_menu_widget(handle: String) -> Element<'static, Message> {
     let menu_btn = |label: &str, msg: Message| {
         button(
             text(label.to_string()).size(12)

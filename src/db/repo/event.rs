@@ -70,6 +70,40 @@ pub fn set_year(txn: &Transaction, handle: &str, year: i32) -> Result<Event> {
     Ok(event)
 }
 
+/// Update just the date of an existing event with a full Date.
+/// Leaves description, place, and all other fields intact.
+pub fn set_date(txn: &Transaction, handle: &str, date: Option<Date>) -> Result<Event> {
+    let existing_json: String = txn
+        .query_row(
+            "SELECT json_data FROM event WHERE handle = ?1",
+            params![handle],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("load event {handle}"))?;
+    let mut event: Event =
+        serde_json::from_str(&existing_json).context("parse existing event")?;
+    event.date = date;
+    event.change = now_unix();
+    update_row(txn, &event)?;
+    Ok(event)
+}
+
+/// Build a Date from day/month/year. Any component can be 0 for unknown.
+pub fn make_date(day: i32, month: i32, year: i32) -> Date {
+    Date {
+        class: Some("Date".to_string()),
+        calendar: 0,
+        modifier: 0,
+        quality: 0,
+        dateval: Some(DateVal::Simple(day, month, year, false)),
+        text: String::new(),
+        sortval: 0,
+        newyear: 0,
+        format: None,
+        year: if year == 0 { None } else { Some(year) },
+    }
+}
+
 /// Delete an event. Refuses if any object still references it.
 pub fn delete(txn: &Transaction, handle: &str) -> Result<()> {
     let refs = inbound_ref_count(txn, handle)?;

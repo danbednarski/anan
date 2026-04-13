@@ -34,6 +34,7 @@ use super::common::{
 };
 use super::{event as event_repo, family as family_repo};
 use crate::gramps::common::Typed;
+use crate::gramps::date::Date;
 use crate::gramps::event::EventRef;
 use crate::gramps::person::{Name, Person, Surname};
 
@@ -105,15 +106,15 @@ pub fn preview_delete(conn: &Connection, handle: &str) -> Result<DeletePreview> 
 }
 
 /// Create a new person with the given name + gender. Optionally
-/// attaches freshly-created Birth and Death events (year-only). The
-/// returned record reflects what was written.
+/// attaches freshly-created Birth and Death events. The returned
+/// record reflects what was written.
 pub fn create(
     txn: &Transaction,
     first_name: &str,
     surname: &str,
     gender: i32,
-    birth_year: Option<i32>,
-    death_year: Option<i32>,
+    birth_date: Option<Date>,
+    death_date: Option<Date>,
 ) -> Result<Person> {
     let mut person = Person {
         class: Some("Person".to_string()),
@@ -140,13 +141,13 @@ pub fn create(
         tag_list: Vec::new(),
     };
 
-    if let Some(y) = birth_year {
-        let ev = event_repo::create_date_only(txn, EVENT_BIRTH, y)?;
+    if let Some(date) = birth_date {
+        let ev = event_repo::create_full(txn, EVENT_BIRTH, "", None, Some(date))?;
         person.event_ref_list.push(primary_event_ref(&ev.handle));
         person.birth_ref_index = (person.event_ref_list.len() - 1) as i32;
     }
-    if let Some(y) = death_year {
-        let ev = event_repo::create_date_only(txn, EVENT_DEATH, y)?;
+    if let Some(date) = death_date {
+        let ev = event_repo::create_full(txn, EVENT_DEATH, "", None, Some(date))?;
         person.event_ref_list.push(primary_event_ref(&ev.handle));
         person.death_ref_index = (person.event_ref_list.len() - 1) as i32;
     }
@@ -161,11 +162,9 @@ pub fn create(
 ///
 /// Date semantics:
 ///
-/// - `birth_year = Some(0)` or `None` removes the birth event link
-///   (the event row itself stays — orphan cleanup is the caller's
-///   decision, and for update it's typically wrong to delete).
-/// - `birth_year = Some(y > 0)` updates the existing birth event's
-///   date if one is linked, or creates a new Birth event otherwise.
+/// - `None` removes the birth/death event link (the event row stays).
+/// - `Some(date)` updates the existing birth event's date if one is
+///   linked, or creates a new Birth event otherwise.
 /// - Same for death.
 pub fn update(
     txn: &Transaction,
@@ -173,8 +172,8 @@ pub fn update(
     first_name: &str,
     surname: &str,
     gender: i32,
-    birth_year: Option<i32>,
-    death_year: Option<i32>,
+    birth_date: Option<Date>,
+    death_date: Option<Date>,
 ) -> Result<Person> {
     let existing_json: String = txn
         .query_row(
@@ -188,18 +187,18 @@ pub fn update(
 
     person.primary_name = build_name(first_name, surname);
     person.gender = gender;
-    apply_year_edit(
+    apply_date_edit(
         txn,
         &mut person,
         EVENT_BIRTH,
-        birth_year,
+        birth_date,
         PersonDateField::Birth,
     )?;
-    apply_year_edit(
+    apply_date_edit(
         txn,
         &mut person,
         EVENT_DEATH,
-        death_year,
+        death_date,
         PersonDateField::Death,
     )?;
     person.change = now_unix();
@@ -479,18 +478,16 @@ enum PersonDateField {
     Death,
 }
 
-/// Apply the requested year edit to `person`'s birth or death event.
+/// Apply a date edit to a person's birth or death event.
 ///
-/// - `Some(y > 0)` with existing linked event → update that event.
-/// - `Some(y > 0)` with no existing link → create a new event and
-///   append to `event_ref_list`, recording the new index.
-/// - `Some(0)` or `None` → clear the link (leave the event row
-///   intact; user can delete it via the event view).
-fn apply_year_edit(
+/// - `Some(date)` with existing linked event: update that event's date.
+/// - `Some(date)` with no link: create a new event and link it.
+/// - `None`: clear the link (event row stays for manual cleanup).
+fn apply_date_edit(
     txn: &Transaction,
     person: &mut Person,
     type_value: i32,
-    year: Option<i32>,
+    date: Option<Date>,
     field: PersonDateField,
 ) -> Result<()> {
     let current_index: &mut i32 = match field {
@@ -507,19 +504,16 @@ fn apply_year_edit(
         None
     };
 
-    match year {
-        None | Some(0) => {
+    match date {
+        None => {
             *current_index = -1;
-            // We intentionally leave the event row alone so we don't
-            // clobber data the user might still want.
-            let _ = linked_handle;
             Ok(())
         }
-        Some(y) => {
+        Some(d) => {
             if let Some(handle) = linked_handle {
-                event_repo::set_year(txn, &handle, y)?;
+                event_repo::set_date(txn, &handle, Some(d))?;
             } else {
-                let ev = event_repo::create_date_only(txn, type_value, y)?;
+                let ev = event_repo::create_full(txn, type_value, "", None, Some(d))?;
                 person.event_ref_list.push(primary_event_ref(&ev.handle));
                 *current_index = (person.event_ref_list.len() - 1) as i32;
             }

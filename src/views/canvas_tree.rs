@@ -251,7 +251,10 @@ fn build_layout(
                 let sort_key = if k1 < f32::MAX && k2 < f32::MAX { (k1 + k2) / 2.0 }
                     else if k1 < f32::MAX { k1 }
                     else { k2 };
-                ordered.push(OrderedItem::Couple(f.clone(), m.clone(), fam.handle.clone(), sort_key));
+                // Place partner whose parents are further left on the left
+                // side, so connector lines don't cross unnecessarily.
+                let (left, right) = if k2 < k1 { (m.clone(), f.clone()) } else { (f.clone(), m.clone()) };
+                ordered.push(OrderedItem::Couple(left, right, fam.handle.clone(), sort_key));
             }
         }
 
@@ -332,6 +335,16 @@ fn build_layout(
                 *px += clamped_shift;
             }
         }
+    }
+
+    // Normalize: ensure leftmost card starts at PADDING (no dead space
+    // on the left from the centering shift).
+    let final_min = cards.iter().map(|c| c.x).fold(f32::MAX, f32::min);
+    if final_min > PADDING + 1.0 {
+        let norm = PADDING - final_min;
+        for card in &mut cards { card.x += norm; }
+        for (_, (fx, mx)) in &mut family_pos { *fx += norm; *mx += norm; }
+        for (_, px) in &mut person_x { *px += norm; }
     }
 
     // Build connections: for each family, draw from couple junction to children.

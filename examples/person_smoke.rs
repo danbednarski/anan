@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use anan::db::{repo, Database};
+use anan::db::repo::event::make_date;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -49,8 +50,8 @@ fn main() -> Result<()> {
                 "Testy",
                 "McTestface",
                 1, // male
-                Some(1901),
-                Some(1975),
+                Some(make_date(0, 0, 1901)),
+                Some(make_date(0, 0, 1975)),
             )
         })
         .context("create person")?;
@@ -88,7 +89,7 @@ fn main() -> Result<()> {
         .expect("birth event");
     assert_eq!(
         birth.date.as_ref().map(|d| d.primary_year()),
-        Some(1901)
+        Some(make_date(0, 0, 1901))
     );
     println!("create OK  —  {} {}", fetched.gramps_id, fetched.primary_name.display());
 
@@ -102,8 +103,8 @@ fn main() -> Result<()> {
             "Testing",
             "McTesterson",
             1,
-            Some(1902), // birth year changed
-            Some(1980), // death year changed
+            Some(make_date(0, 0, 1902)), // birth year changed
+            Some(make_date(0, 0, 1980)), // death year changed
         )
     })
     .context("update person")?;
@@ -129,7 +130,7 @@ fn main() -> Result<()> {
         .expect("birth event after update");
     assert_eq!(
         birth.date.as_ref().map(|d| d.primary_year()),
-        Some(1902),
+        Some(make_date(0, 0, 1902)),
         "birth year updated"
     );
     let death = after_update
@@ -137,7 +138,7 @@ fn main() -> Result<()> {
         .expect("death event after update");
     assert_eq!(
         death.date.as_ref().map(|d| d.primary_year()),
-        Some(1980),
+        Some(make_date(0, 0, 1980)),
         "death year updated"
     );
     println!("update OK");

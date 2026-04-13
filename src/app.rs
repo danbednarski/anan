@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
-use iced::widget::{button, column, container, pick_list, row, scrollable, stack, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, stack, text, text_input, Column};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
 
 use crate::db::{repo as dbrepo, Database, Snapshot};
@@ -200,11 +200,15 @@ pub struct PendingAdd {
     pub first_name: String,
     pub surname: String,
     pub gender_s: String,
-    pub birth_year_s: String,
-    pub death_year_s: String,
+    pub birth_date_s: String,
+    pub death_date_s: String,
     /// Optional source URL/description. When non-empty, a Source +
     /// Citation are auto-created and attached to the new person.
     pub source_url: String,
+    /// Search query for linking an existing person instead of creating.
+    pub search_existing: String,
+    /// When set, link this existing person instead of creating a new one.
+    pub existing_handle: Option<String>,
 }
 
 /// One open edit — either a brand-new object that hasn't been saved
@@ -295,10 +299,10 @@ pub struct PersonDraft {
     pub surname: String,
     /// Gender as a string: 0 female, 1 male, 2 unknown. Parsed on save.
     pub gender_s: String,
-    /// Empty string = "no birth year"; otherwise parsed as i32.
-    pub birth_year_s: String,
-    /// Empty string = "no death year"; otherwise parsed as i32.
-    pub death_year_s: String,
+    /// Date string: "20 Jan 1992", "Jan 1992", or "1992". Blank = unknown.
+    pub birth_date_s: String,
+    /// Date string: "20 Jan 1992", "Jan 1992", or "1992". Blank = unknown.
+    pub death_date_s: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -389,9 +393,12 @@ pub enum Message {
     AddFirstName(String),
     AddSurname(String),
     AddGender(String),
-    AddBirthYear(String),
-    AddDeathYear(String),
+    AddBirthDate(String),
+    AddDeathDate(String),
     AddSourceUrl(String),
+    AddSearchExisting(String),
+    AddPickExisting(String),
+    AddClearExisting,
     /// Toggle sidebar visibility.
     ToggleSidebar,
     /// Toggle the "Browse all" section in the sidebar.
@@ -432,8 +439,8 @@ pub enum Message {
     EditPersonFirstName(String),
     EditPersonSurname(String),
     EditPersonGender(String),
-    EditPersonBirthYear(String),
-    EditPersonDeathYear(String),
+    EditPersonBirthDate(String),
+    EditPersonDeathDate(String),
     /// User toggled "also delete this person's exclusive events" on
     /// the cascade confirmation banner.
     ToggleDeleteOwnedEvents,
@@ -713,9 +720,11 @@ impl App {
                     first_name: String::new(),
                     surname,
                     gender_s: rel.default_gender().to_string(),
-                    birth_year_s: String::new(),
-                    death_year_s: String::new(),
+                    birth_date_s: String::new(),
+                    death_date_s: String::new(),
                     source_url: String::new(),
+                    search_existing: String::new(),
+                    existing_handle: None,
                 });
                 Task::none()
             }
@@ -752,15 +761,35 @@ impl App {
                 }
                 Task::none()
             }
-            Message::AddBirthYear(v) => {
+            Message::AddBirthDate(v) => {
                 if let Some(a) = self.pending_add.as_mut() {
-                    a.birth_year_s = v;
+                    a.birth_date_s = v;
                 }
                 Task::none()
             }
-            Message::AddDeathYear(v) => {
+            Message::AddDeathDate(v) => {
                 if let Some(a) = self.pending_add.as_mut() {
-                    a.death_year_s = v;
+                    a.death_date_s = v;
+                }
+                Task::none()
+            }
+            Message::AddSearchExisting(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.search_existing = v;
+                    a.existing_handle = None;
+                }
+                Task::none()
+            }
+            Message::AddPickExisting(handle) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.existing_handle = Some(handle);
+                    a.search_existing.clear();
+                }
+                Task::none()
+            }
+            Message::AddClearExisting => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.existing_handle = None;
                 }
                 Task::none()
             }
@@ -968,15 +997,15 @@ impl App {
                 }
                 Task::none()
             }
-            Message::EditPersonBirthYear(v) => {
+            Message::EditPersonBirthDate(v) => {
                 if let Some(EditDraft::Person(d)) = self.draft_mut() {
-                    d.birth_year_s = v;
+                    d.birth_date_s = v;
                 }
                 Task::none()
             }
-            Message::EditPersonDeathYear(v) => {
+            Message::EditPersonDeathDate(v) => {
                 if let Some(EditDraft::Person(d)) = self.draft_mut() {
-                    d.death_year_s = v;
+                    d.death_date_s = v;
                 }
                 Task::none()
             }
@@ -1244,25 +1273,25 @@ impl App {
                     .or_else(|| p.primary_name.surname_list.first())
                     .map(|s| s.surname.clone())
                     .unwrap_or_default();
-                let birth_year = if p.birth_ref_index >= 0 {
+                let birth_date_s = if p.birth_ref_index >= 0 {
                     p.event_ref_list
                         .get(p.birth_ref_index as usize)
                         .and_then(|er| snap.event(&er.r#ref))
                         .and_then(|e| e.date.as_ref())
-                        .map(|d| d.primary_year())
-                        .filter(|y| *y != 0)
+                        .map(format_date_for_edit)
+                        .unwrap_or_default()
                 } else {
-                    None
+                    String::new()
                 };
-                let death_year = if p.death_ref_index >= 0 {
+                let death_date_s = if p.death_ref_index >= 0 {
                     p.event_ref_list
                         .get(p.death_ref_index as usize)
                         .and_then(|er| snap.event(&er.r#ref))
                         .and_then(|e| e.date.as_ref())
-                        .map(|d| d.primary_year())
-                        .filter(|y| *y != 0)
+                        .map(format_date_for_edit)
+                        .unwrap_or_default()
                 } else {
-                    None
+                    String::new()
                 };
                 Some(EditSession {
                     handle: Some(p.handle.clone()),
@@ -1270,12 +1299,8 @@ impl App {
                         first_name: p.primary_name.first_name.clone(),
                         surname,
                         gender_s: p.gender.to_string(),
-                        birth_year_s: birth_year
-                            .map(|y| y.to_string())
-                            .unwrap_or_default(),
-                        death_year_s: death_year
-                            .map(|y| y.to_string())
-                            .unwrap_or_default(),
+                        birth_date_s,
+                        death_date_s,
                     }),
                 })
             }
@@ -2209,20 +2234,20 @@ impl App {
         .spacing(4);
 
         let birth_field = column![
-            label("Birth year (blank for unknown)"),
-            text_input("e.g. 1890", &add.birth_year_s)
-                .on_input(Message::AddBirthYear)
+            label("Birth date (blank for unknown)"),
+            text_input("e.g. 20 Jan 1992, Jan 1992, or 1992", &add.birth_date_s)
+                .on_input(Message::AddBirthDate)
                 .padding(6)
-                .width(Length::Fixed(120.0)),
+                .width(Length::Fixed(200.0)),
         ]
         .spacing(4);
 
         let death_field = column![
-            label("Death year (blank for unknown)"),
-            text_input("e.g. 1965", &add.death_year_s)
-                .on_input(Message::AddDeathYear)
+            label("Death date (blank for unknown)"),
+            text_input("e.g. 9 Dec 2025, Dec 2025, or 2025", &add.death_date_s)
+                .on_input(Message::AddDeathDate)
                 .padding(6)
-                .width(Length::Fixed(120.0)),
+                .width(Length::Fixed(200.0)),
         ]
         .spacing(4);
 
@@ -2234,23 +2259,96 @@ impl App {
         ]
         .spacing(4);
 
+        // Search for existing person to link instead of creating.
+        let mut search_section: Column<'_, Message> = column![].spacing(4);
+        if let Some(ref existing_h) = add.existing_handle {
+            let existing_name = self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.person(existing_h))
+                .map(|p| p.primary_name.display())
+                .unwrap_or_else(|| existing_h.clone());
+            search_section = search_section
+                .push(label("Linking existing person:"))
+                .push(
+                    row![
+                        text(existing_name).size(13),
+                        button(text("Clear").size(11))
+                            .on_press(Message::AddClearExisting)
+                            .padding(4),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+        } else {
+            search_section = search_section
+                .push(label("Or search for an existing person"))
+                .push(
+                    text_input("Search by name...", &add.search_existing)
+                        .on_input(Message::AddSearchExisting)
+                        .padding(6),
+                );
+            // Show search results.
+            if add.search_existing.len() >= 2 {
+                if let Some(snap) = &self.snapshot {
+                    let query = add.search_existing.to_lowercase();
+                    let mut results: Vec<_> = snap
+                        .persons
+                        .iter()
+                        .filter(|p| {
+                            let name = p.primary_name.display().to_lowercase();
+                            name.contains(&query)
+                        })
+                        .take(6)
+                        .collect();
+                    results.sort_by(|a, b| {
+                        a.primary_name
+                            .display()
+                            .cmp(&b.primary_name.display())
+                    });
+                    for p in results {
+                        let h = p.handle.clone();
+                        let display = format!(
+                            "{} ({})",
+                            p.primary_name.display(),
+                            p.gramps_id
+                        );
+                        search_section = search_section.push(
+                            button(text(display).size(12))
+                                .on_press(Message::AddPickExisting(h))
+                                .padding(4)
+                                .width(Length::Fill),
+                        );
+                    }
+                }
+            }
+        }
+
         let buttons = row![
-            button(text("Save")).on_press(Message::TreeSubmitAdd),
+            button(text(if add.existing_handle.is_some() {
+                "Link"
+            } else {
+                "Save"
+            }))
+            .on_press(Message::TreeSubmitAdd),
             button(text("Cancel")).on_press(Message::TreeCancelAdd),
         ]
         .spacing(12);
 
+        let mut form_col: Column<'_, Message> = column![title].spacing(12);
+        form_col = form_col.push(search_section);
+        if add.existing_handle.is_none() {
+            form_col = form_col
+                .push(first_name_field)
+                .push(surname_field)
+                .push(gender_field)
+                .push(row![birth_field, death_field].spacing(16))
+                .push(source_field);
+        }
+        form_col = form_col.push(buttons);
+
         let card = container(
-            column![
-                title,
-                first_name_field,
-                surname_field,
-                gender_field,
-                row![birth_field, death_field].spacing(16),
-                source_field,
-                buttons,
-            ]
-            .spacing(12)
+            form_col
             .padding(24)
             .max_width(420),
         )
@@ -2523,18 +2621,8 @@ async fn save_async(db: Arc<Database>, session: EditSession) -> Result<Snapshot,
             }
             EditDraft::Person(draft) => {
                 let gender = draft.gender_s.parse().unwrap_or(2);
-                let birth = draft
-                    .birth_year_s
-                    .trim()
-                    .parse::<i32>()
-                    .ok()
-                    .filter(|y| *y != 0);
-                let death = draft
-                    .death_year_s
-                    .trim()
-                    .parse::<i32>()
-                    .ok()
-                    .filter(|y| *y != 0);
+                let birth = parse_date_input(&draft.birth_date_s);
+                let death = parse_date_input(&draft.death_date_s);
                 match session.handle {
                     Some(h) => {
                         dbrepo::person::update(
@@ -2761,44 +2849,48 @@ async fn delete_async(
 /// Run the add-person-with-relationship action from the modal form.
 async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, String> {
     let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
-        let gender: i32 = add.gender_s.parse().unwrap_or(2);
-        let birth = add.birth_year_s.trim().parse::<i32>().ok().filter(|y| *y != 0);
-        let death = add.death_year_s.trim().parse::<i32>().ok().filter(|y| *y != 0);
-
         db.write_txn(|txn| {
-            let mut person = dbrepo::person::create(
-                txn,
-                &add.first_name,
-                &add.surname,
-                gender,
-                birth,
-                death,
-            )?;
+            let person_handle = if let Some(existing) = &add.existing_handle {
+                // Link an existing person instead of creating a new one.
+                existing.clone()
+            } else {
+                let gender: i32 = add.gender_s.parse().unwrap_or(2);
+                let birth = parse_date_input(&add.birth_date_s);
+                let death = parse_date_input(&add.death_date_s);
 
-            // Auto-create Source + Citation if a source URL was provided.
-            let source_url = add.source_url.trim();
-            if !source_url.is_empty() {
-                let src = dbrepo::source::create(txn, source_url, "", "", "")?;
-                let cit = dbrepo::citation::create(txn, &src.handle, source_url, 2, None)?;
-                // Attach the citation to the person's citation_list and
-                // rewrite the person row.
-                person.citation_list.push(cit.handle);
-                dbrepo::person::save_row(txn, &mut person)?;
-            }
+                let mut person = dbrepo::person::create(
+                    txn,
+                    &add.first_name,
+                    &add.surname,
+                    gender,
+                    birth,
+                    death,
+                )?;
 
+                let source_url = add.source_url.trim();
+                if !source_url.is_empty() {
+                    let src = dbrepo::source::create(txn, source_url, "", "", "")?;
+                    let cit = dbrepo::citation::create(txn, &src.handle, source_url, 2, None)?;
+                    person.citation_list.push(cit.handle);
+                    dbrepo::person::save_row(txn, &mut person)?;
+                }
+                person.handle.clone()
+            };
+
+            let gender: i32 = add.gender_s.parse().unwrap_or(2);
             match add.relationship {
                 AddRelationship::Child => {
                     dbrepo::relationships::add_child_existing(
                         txn,
                         &add.target_handle,
-                        &person.handle,
+                        &person_handle,
                     )?;
                 }
                 AddRelationship::Father | AddRelationship::Mother => {
                     dbrepo::relationships::add_parent_existing(
                         txn,
                         &add.target_handle,
-                        &person.handle,
+                        &person_handle,
                         gender,
                     )?;
                 }
@@ -2806,7 +2898,7 @@ async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, 
                     dbrepo::relationships::add_sibling_existing(
                         txn,
                         &add.target_handle,
-                        &person.handle,
+                        &person_handle,
                     )?;
                 }
             }
@@ -2829,8 +2921,8 @@ fn default_draft_for(view: View) -> EditDraft {
             surname: String::new(),
             // Gender::Unknown = 2
             gender_s: "2".to_string(),
-            birth_year_s: String::new(),
-            death_year_s: String::new(),
+            birth_date_s: String::new(),
+            death_date_s: String::new(),
         }),
         View::Families => EditDraft::Family(FamilyDraft {
             father_gid: String::new(),
@@ -2882,5 +2974,75 @@ fn default_draft_for(view: View) -> EditDraft {
         // won't actually reach this branch because the "New" button is
         // gated on an editable view.
         _ => EditDraft::Tag(TagDraft::default()),
+    }
+}
+
+// ---- date parsing helpers ------------------------------------------------
+
+const MONTH_NAMES: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun",
+    "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+/// Parse a user-typed date string into a Gramps Date.
+/// Accepts: "20 Jan 1992", "Jan 1992", "1992".
+fn parse_date_input(s: &str) -> Option<crate::gramps::date::Date> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Year only: "1992"
+    if let Ok(y) = s.parse::<i32>() {
+        if y == 0 { return None; }
+        return Some(crate::db::repo::event::make_date(0, 0, y));
+    }
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    match parts.len() {
+        // "20 Jan 1992"
+        3 => {
+            let day = parts[0].parse::<i32>().ok()?;
+            let month = parse_month_name(parts[1])?;
+            let year = parts[2].parse::<i32>().ok()?;
+            Some(crate::db::repo::event::make_date(day, month, year))
+        }
+        // "Jan 1992"
+        2 => {
+            let month = parse_month_name(parts[0])?;
+            let year = parts[1].parse::<i32>().ok()?;
+            Some(crate::db::repo::event::make_date(0, month, year))
+        }
+        _ => None,
+    }
+}
+
+fn parse_month_name(s: &str) -> Option<i32> {
+    let lower = s.to_lowercase();
+    MONTH_NAMES
+        .iter()
+        .position(|m| lower.starts_with(m))
+        .map(|i| i as i32 + 1)
+}
+
+/// Format a Date back into the "DD Mon YYYY" string for the edit field.
+fn format_date_for_edit(date: &crate::gramps::date::Date) -> String {
+    use crate::gramps::date::DateVal;
+    let (day, month, year) = match &date.dateval {
+        Some(DateVal::Simple(d, m, y, _)) => (*d, *m, *y),
+        Some(DateVal::Range(d, m, y, _, _, _, _, _)) => (*d, *m, *y),
+        None => (0, 0, date.year.unwrap_or(0)),
+    };
+    if year == 0 {
+        return String::new();
+    }
+    let month_name = if month >= 1 && month <= 12 {
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][(month - 1) as usize]
+    } else {
+        ""
+    };
+    match (day > 0, month > 0) {
+        (true, true) => format!("{day} {month_name} {year}"),
+        (false, true) => format!("{month_name} {year}"),
+        _ => format!("{year}"),
     }
 }

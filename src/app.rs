@@ -524,24 +524,19 @@ impl App {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/sample.db");
         let (loading, initial) = if fixture.exists() {
             let scratch = std::env::temp_dir().join("anan-scratch.db");
-            // Always refresh the scratch copy on launch so developers get
-            // a clean fixture each run. If the copy fails (e.g. /tmp is
-            // non-writable) we fall through to opening the original,
-            // which is a safer failure mode than silently hiding an
-            // error — the user will see the bubble-up.
-            match std::fs::copy(&fixture, &scratch) {
-                Ok(_) => (
-                    true,
-                    Task::perform(load_async(scratch), Message::DbOpened),
-                ),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "could not copy fixture to scratch; opening original read-write"
-                    );
-                    (true, Task::perform(load_async(fixture), Message::DbOpened))
+            // Only seed the scratch copy if it doesn't already exist.
+            // This preserves user edits between sessions. To reset to
+            // the clean fixture, delete the scratch file manually.
+            if !scratch.exists() {
+                if let Err(e) = std::fs::copy(&fixture, &scratch) {
+                    tracing::warn!(error = %e, "could not seed scratch db from fixture");
                 }
             }
+            let path = if scratch.exists() { scratch } else { fixture };
+            (
+                true,
+                Task::perform(load_async(path), Message::DbOpened),
+            )
         } else {
             (false, Task::none())
         };

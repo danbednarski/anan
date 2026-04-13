@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use gramps_desktop::gramps::{
+use anan::gramps::{
     self, Citation, Event, Family, Media, Note, Person, Place, Repository, Source, Tag,
 };
 use rusqlite::{Connection, OpenFlags};

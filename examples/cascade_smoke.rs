@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use gramps_desktop::db::{repo, Database};
+use anan::db::{repo, Database};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();

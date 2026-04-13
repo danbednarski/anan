@@ -516,7 +516,7 @@ impl App {
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/sample.db");
         let (loading, initial) = if fixture.exists() {
-            let scratch = std::env::temp_dir().join("gramps-desktop-scratch.db");
+            let scratch = std::env::temp_dir().join("anan-scratch.db");
             // Always refresh the scratch copy on launch so developers get
             // a clean fixture each run. If the copy fails (e.g. /tmp is
             // non-writable) we fall through to opening the original,

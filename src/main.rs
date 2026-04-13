@@ -1,6 +1,6 @@
 //! Binary entry point — wires the iced runtime to `app::App`.
 
-use gramps_desktop::app::App;
+use anan::app::App;
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()

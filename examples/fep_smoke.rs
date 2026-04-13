@@ -18,8 +18,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use gramps_desktop::db::{repo, Database};
-use gramps_desktop::gramps::date::{Date, DateVal};
+use anan::db::{repo, Database};
+use anan::gramps::date::{Date, DateVal};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();

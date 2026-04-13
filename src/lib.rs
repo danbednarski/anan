@@ -1,4 +1,4 @@
-//! gramps-desktop — Rust native desktop UI for Gramps family trees.
+//! anan — native desktop genealogy app.
 //!
 //! The crate is split into a library (this file, importable by
 //! `examples/*.rs` and eventually integration tests) and a binary

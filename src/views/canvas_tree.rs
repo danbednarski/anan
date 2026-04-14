@@ -608,9 +608,9 @@ fn draw_card(frame: &mut Frame, card: &CardInfo) {
     } else if card.in_lineage {
         (theme::CARD, theme::TEXT, theme::ACCENT)
     } else {
-        // Dimmed: semi-transparent card for non-lineage people.
-        (Color::from_rgba(1.0, 1.0, 1.0, 0.5),
-         Color::from_rgba(0.18, 0.20, 0.21, 0.45),
+        // Dimmed card but keep text readable.
+        (Color::from_rgba(1.0, 1.0, 1.0, 0.45),
+         Color::from_rgba(0.18, 0.20, 0.21, 0.75),
          Color::from_rgba(0.875, 0.902, 0.914, 0.45))
     };
 

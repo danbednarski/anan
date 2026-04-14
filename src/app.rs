@@ -209,6 +209,10 @@ pub struct PendingAdd {
     pub search_existing: String,
     /// When set, link this existing person instead of creating a new one.
     pub existing_handle: Option<String>,
+    /// Search for other parent when adding a child.
+    pub other_parent_search: String,
+    /// When set, specifies the other parent for a new child.
+    pub other_parent_handle: Option<String>,
 }
 
 /// One open edit — either a brand-new object that hasn't been saved
@@ -399,6 +403,9 @@ pub enum Message {
     AddSearchExisting(String),
     AddPickExisting(String),
     AddClearExisting,
+    AddOtherParentSearch(String),
+    AddPickOtherParent(String),
+    AddClearOtherParent,
     /// Toggle sidebar visibility.
     ToggleSidebar,
     /// Toggle the "Browse all" section in the sidebar.
@@ -720,6 +727,8 @@ impl App {
                     source_url: String::new(),
                     search_existing: String::new(),
                     existing_handle: None,
+                    other_parent_search: String::new(),
+                    other_parent_handle: None,
                 });
                 Task::none()
             }
@@ -785,6 +794,26 @@ impl App {
             Message::AddClearExisting => {
                 if let Some(a) = self.pending_add.as_mut() {
                     a.existing_handle = None;
+                }
+                Task::none()
+            }
+            Message::AddOtherParentSearch(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.other_parent_search = v;
+                    a.other_parent_handle = None;
+                }
+                Task::none()
+            }
+            Message::AddPickOtherParent(handle) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.other_parent_handle = Some(handle);
+                    a.other_parent_search.clear();
+                }
+                Task::none()
+            }
+            Message::AddClearOtherParent => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.other_parent_handle = None;
                 }
                 Task::none()
             }
@@ -2330,6 +2359,67 @@ impl App {
         ]
         .spacing(12);
 
+        // Other parent section (only for adding a child).
+        let mut other_parent_section: Column<'_, Message> = column![].spacing(4);
+        if matches!(add.relationship, AddRelationship::Child) {
+            if let Some(ref op_h) = add.other_parent_handle {
+                let op_name = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.person(op_h))
+                    .map(|p| p.primary_name.display())
+                    .unwrap_or_else(|| op_h.clone());
+                other_parent_section = other_parent_section
+                    .push(label("Other parent:"))
+                    .push(
+                        row![
+                            text(op_name).size(13),
+                            button(text("Clear").size(11))
+                                .on_press(Message::AddClearOtherParent)
+                                .padding(4),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    );
+            } else {
+                other_parent_section = other_parent_section
+                    .push(label("Other parent (optional)"))
+                    .push(
+                        text_input("Search by name...", &add.other_parent_search)
+                            .on_input(Message::AddOtherParentSearch)
+                            .padding(6),
+                    );
+                if add.other_parent_search.len() >= 2 {
+                    if let Some(snap) = &self.snapshot {
+                        let query = add.other_parent_search.to_lowercase();
+                        let results: Vec<_> = snap
+                            .persons
+                            .iter()
+                            .filter(|p| {
+                                p.handle != add.target_handle
+                                    && p.primary_name.display().to_lowercase().contains(&query)
+                            })
+                            .take(6)
+                            .collect();
+                        for p in results {
+                            let h = p.handle.clone();
+                            let display = format!(
+                                "{} ({})",
+                                p.primary_name.display(),
+                                p.gramps_id
+                            );
+                            other_parent_section = other_parent_section.push(
+                                button(text(display).size(12))
+                                    .on_press(Message::AddPickOtherParent(h))
+                                    .padding(4)
+                                    .width(Length::Fill),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let mut form_col: Column<'_, Message> = column![title].spacing(12);
         form_col = form_col.push(search_section);
         if add.existing_handle.is_none() {
@@ -2339,6 +2429,9 @@ impl App {
                 .push(gender_field)
                 .push(row![birth_field, death_field].spacing(16))
                 .push(source_field);
+        }
+        if matches!(add.relationship, AddRelationship::Child) {
+            form_col = form_col.push(other_parent_section);
         }
         form_col = form_col.push(buttons);
 
@@ -2875,10 +2968,11 @@ async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, 
             let gender: i32 = add.gender_s.parse().unwrap_or(2);
             match add.relationship {
                 AddRelationship::Child => {
-                    dbrepo::relationships::add_child_existing(
+                    dbrepo::relationships::add_child_with_parents(
                         txn,
                         &add.target_handle,
                         &person_handle,
+                        add.other_parent_handle.as_deref(),
                     )?;
                 }
                 AddRelationship::Father | AddRelationship::Mother => {

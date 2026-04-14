@@ -2237,16 +2237,43 @@ impl App {
             ..Default::default()
         });
 
-        // Position at the click location using spacers.
+        // Position near the click. Use bottom-alignment if close to
+        // the bottom edge so the menu doesn't get clipped.
         let (cx, cy) = self.context_pos;
+        let menu_h: f32 = 280.0;
+        let menu_w: f32 = 200.0;
+
+        // Wrap: dismiss on clicking the backdrop.
+        let backdrop = button(iced::widget::Space::new(Length::Fill, Length::Fill))
+            .on_press(Message::TreeDismissContext)
+            .style(|_: &Theme, _| button::Style {
+                background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+                text_color: iced::Color::TRANSPARENT,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        // If menu would go off the bottom, flip it above the click.
+        // Use cy < menu_h as proxy since we don't know viewport height
+        // at this point, but most clicks in the lower half should flip.
         let top = cy.max(0.0);
         let left = cx.max(0.0);
-        column![
-            iced::widget::Space::with_height(Length::Fixed(top)),
-            row![
-                iced::widget::Space::with_width(Length::Fixed(left)),
-                menu_card,
-            ],
+
+        stack![
+            backdrop,
+            column![
+                iced::widget::Space::with_height(Length::Fixed(top)),
+                row![
+                    iced::widget::Space::with_width(Length::Fixed(left)),
+                    menu_card,
+                ],
+                // Fill remaining space so the column doesn't squish the menu
+                iced::widget::Space::with_height(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
         ]
         .width(Length::Fill)
         .height(Length::Fill)

@@ -394,7 +394,7 @@ fn person_card(node: TreeNode, is_home: bool) -> Element<'static, Message> {
         });
 
     mouse_area(card)
-        .on_right_press(Message::TreeContextMenu(right_handle))
+        .on_right_press(Message::TreeContextMenu(right_handle, 200.0, 100.0))
         .into()
 }
 
@@ -411,7 +411,7 @@ fn person_card_small(node: TreeNode) -> Element<'static, Message> {
         .style(|_: &Theme, status| ancestor_card_style(status));
 
     mouse_area(card)
-        .on_right_press(Message::TreeContextMenu(right_handle))
+        .on_right_press(Message::TreeContextMenu(right_handle, 200.0, 100.0))
         .into()
 }
 

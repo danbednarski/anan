@@ -137,6 +137,7 @@ pub struct App {
     /// right-clicked in the tree. While Some, the context bar renders
     /// action buttons for that person.
     context_target: Option<String>,
+    context_pos: (f32, f32),
 
     /// Modal form for adding a new person with a relationship. While
     /// Some, an overlay appears on top of the tree with name/gender/
@@ -383,7 +384,7 @@ pub enum Message {
     /// Click a person card in the tree → re-home on that person.
     TreeHome(String),
     /// Right-click a person card → open context menu for that person.
-    TreeContextMenu(String),
+    TreeContextMenu(String, f32, f32),
     /// Dismiss the context menu.
     TreeDismissContext,
     /// User picked an action from the context menu → open the add-person
@@ -422,6 +423,8 @@ pub enum Message {
     StartCreate(View),
     /// Start editing the selected object in the given view.
     StartEditSelected,
+    /// Start editing a specific person by handle (from context menu).
+    StartEditPerson(String),
     /// Drop the current edit session without saving.
     CancelEdit,
     /// Commit the current edit session to the database.
@@ -568,6 +571,7 @@ impl App {
                 edit: None,
                 delete_confirm: None,
                 context_target: None,
+                context_pos: (0.0, 0.0),
                 pending_add: None,
                 sidebar_visible: false,
                 browse_expanded: false,
@@ -684,8 +688,9 @@ impl App {
                 self.home_person = Some(handle);
                 Task::none()
             }
-            Message::TreeContextMenu(handle) => {
+            Message::TreeContextMenu(handle, x, y) => {
                 self.context_target = Some(handle);
+                self.context_pos = (x, y);
                 Task::none()
             }
             Message::TreeDismissContext => {
@@ -870,6 +875,53 @@ impl App {
             Message::StartEditSelected => {
                 self.delete_confirm = None;
                 self.edit = self.populate_edit_from_selection();
+                Task::none()
+            }
+            Message::StartEditPerson(handle) => {
+                self.context_target = None;
+                if let Some(snap) = &self.snapshot {
+                    if let Some(p) = snap.person(&handle) {
+                        let surname = p
+                            .primary_name
+                            .surname_list
+                            .iter()
+                            .find(|s| s.primary)
+                            .or_else(|| p.primary_name.surname_list.first())
+                            .map(|s| s.surname.clone())
+                            .unwrap_or_default();
+                        let birth_date_s = if p.birth_ref_index >= 0 {
+                            p.event_ref_list
+                                .get(p.birth_ref_index as usize)
+                                .and_then(|er| snap.event(&er.r#ref))
+                                .and_then(|e| e.date.as_ref())
+                                .map(format_date_for_edit)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let death_date_s = if p.death_ref_index >= 0 {
+                            p.event_ref_list
+                                .get(p.death_ref_index as usize)
+                                .and_then(|er| snap.event(&er.r#ref))
+                                .and_then(|e| e.date.as_ref())
+                                .map(format_date_for_edit)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        self.current = View::Persons;
+                        self.edit = Some(EditSession {
+                            handle: Some(p.handle.clone()),
+                            draft: EditDraft::Person(PersonDraft {
+                                first_name: p.primary_name.first_name.clone(),
+                                surname,
+                                gender_s: p.gender.to_string(),
+                                birth_date_s,
+                                death_date_s,
+                            }),
+                        });
+                    }
+                }
                 Task::none()
             }
             Message::CancelEdit => {
@@ -2133,9 +2185,7 @@ impl App {
         search::recompute(snap, &mut self.search);
     }
 
-    /// Floating context menu rendered as an overlay in the top-right
-    /// corner of the tree area. Does NOT push content - it layers on
-    /// top via stack.
+    /// Floating context menu rendered near the right-clicked card.
     fn floating_context_menu<'a>(&'a self, target_name: &str) -> Element<'a, Message> {
         let menu_btn = |label: &'static str, msg: Message| {
             button(text(label).size(12))
@@ -2155,17 +2205,17 @@ impl App {
                 })
         };
 
+        let target_h = self.context_target.clone().unwrap_or_default();
         let menu_card = container(
             column![
                 text(target_name.to_string()).size(13).color(crate::theme::TEXT),
+                menu_btn("Edit", Message::StartEditPerson(target_h.clone())),
                 menu_btn("Add child", Message::TreeStartAdd(AddRelationship::Child)),
                 menu_btn("Add father", Message::TreeStartAdd(AddRelationship::Father)),
                 menu_btn("Add mother", Message::TreeStartAdd(AddRelationship::Mother)),
                 menu_btn("Add sibling", Message::TreeStartAdd(AddRelationship::Sibling)),
                 iced::widget::Space::with_height(4),
-                menu_btn("Center here", Message::TreeHome(
-                    self.context_target.clone().unwrap_or_default()
-                )),
+                menu_btn("Center here", Message::TreeHome(target_h)),
                 menu_btn("Dismiss", Message::TreeDismissContext),
             ]
             .spacing(2)
@@ -2187,14 +2237,20 @@ impl App {
             ..Default::default()
         });
 
-        // Position in top-right corner with some padding.
-        container(menu_card)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::End)
-            .align_y(Alignment::Start)
-            .padding([48, 16])
-            .into()
+        // Position at the click location using spacers.
+        let (cx, cy) = self.context_pos;
+        let top = cy.max(0.0);
+        let left = cx.max(0.0);
+        column![
+            iced::widget::Space::with_height(Length::Fixed(top)),
+            row![
+                iced::widget::Space::with_width(Length::Fixed(left)),
+                menu_card,
+            ],
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     /// Modal overlay for the add-person form. Renders on top of the

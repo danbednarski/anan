@@ -1615,8 +1615,16 @@ impl App {
                     }
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };
-                // Use stack for overlays: context menu + modal float above tree.
-                let mut layers: Vec<Element<'_, Message>> = vec![content_body];
+                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
+                if self.sidebar_visible {
+                    main_row = main_row.push(self.nav_column());
+                    main_row = main_row.push(vertical_separator());
+                }
+                main_row = main_row.push(content_body);
+
+                // Context menu and modal float above the entire layout via
+                // a top-level stack so they aren't clipped by the scrollable.
+                let mut layers: Vec<Element<'_, Message>> = vec![main_row.into()];
 
                 if let Some(target) = &self.context_target {
                     let target_name = snap.person(target)
@@ -1629,18 +1637,10 @@ impl App {
                     layers.push(self.add_person_modal(add));
                 }
 
-                let content_stack: Element<'_, Message> = stack(layers)
+                stack(layers)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .into();
-
-                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
-                if self.sidebar_visible {
-                    main_row = main_row.push(self.nav_column());
-                    main_row = main_row.push(vertical_separator());
-                }
-                main_row = main_row.push(content_stack);
-                main_row.into()
+                    .into()
             }
             Some(snap) => {
                 let mut main_row = row![].width(Length::Fill).height(Length::Fill);

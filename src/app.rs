@@ -138,6 +138,7 @@ pub struct App {
     /// action buttons for that person.
     context_target: Option<String>,
     context_pos: (f32, f32),
+    context_viewport: (f32, f32),
 
     /// Modal form for adding a new person with a relationship. While
     /// Some, an overlay appears on top of the tree with name/gender/
@@ -384,7 +385,7 @@ pub enum Message {
     /// Click a person card in the tree → re-home on that person.
     TreeHome(String),
     /// Right-click a person card → open context menu for that person.
-    TreeContextMenu(String, f32, f32),
+    TreeContextMenu(String, f32, f32, f32, f32),
     /// Dismiss the context menu.
     TreeDismissContext,
     /// User picked an action from the context menu → open the add-person
@@ -572,6 +573,7 @@ impl App {
                 delete_confirm: None,
                 context_target: None,
                 context_pos: (0.0, 0.0),
+                context_viewport: (800.0, 600.0),
                 pending_add: None,
                 sidebar_visible: false,
                 browse_expanded: false,
@@ -688,9 +690,10 @@ impl App {
                 self.home_person = Some(handle);
                 Task::none()
             }
-            Message::TreeContextMenu(handle, x, y) => {
+            Message::TreeContextMenu(handle, x, y, vw, vh) => {
                 self.context_target = Some(handle);
                 self.context_pos = (x, y);
+                self.context_viewport = (vw, vh);
                 Task::none()
             }
             Message::TreeDismissContext => {
@@ -2237,13 +2240,12 @@ impl App {
             ..Default::default()
         });
 
-        // Position near the click. Use bottom-alignment if close to
-        // the bottom edge so the menu doesn't get clipped.
         let (cx, cy) = self.context_pos;
+        let (_vw, vh) = self.context_viewport;
         let menu_h: f32 = 280.0;
-        let menu_w: f32 = 200.0;
+        let menu_w: f32 = 190.0;
 
-        // Wrap: dismiss on clicking the backdrop.
+        // Dismiss on clicking the backdrop.
         let backdrop = button(iced::widget::Space::new(Length::Fill, Length::Fill))
             .on_press(Message::TreeDismissContext)
             .style(|_: &Theme, _| button::Style {
@@ -2255,11 +2257,18 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        // If menu would go off the bottom, flip it above the click.
-        // Use cy < menu_h as proxy since we don't know viewport height
-        // at this point, but most clicks in the lower half should flip.
-        let top = cy.max(0.0);
-        let left = cx.max(0.0);
+        // Flip menu above the click if it would extend past the bottom.
+        let top = if cy + menu_h > vh {
+            (cy - menu_h).max(0.0)
+        } else {
+            cy
+        };
+        // Flip left if it would extend past the right edge.
+        let left = if cx + menu_w > _vw {
+            (cx - menu_w).max(0.0)
+        } else {
+            cx
+        };
 
         stack![
             backdrop,
@@ -2269,7 +2278,6 @@ impl App {
                     iced::widget::Space::with_width(Length::Fixed(left)),
                     menu_card,
                 ],
-                // Fill remaining space so the column doesn't squish the menu
                 iced::widget::Space::with_height(Length::Fill),
             ]
             .width(Length::Fill)

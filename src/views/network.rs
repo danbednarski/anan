@@ -540,7 +540,7 @@ fn network_card(
 
     // Right-click for context menu (menu itself renders as overlay in app.rs).
     mouse_area(card)
-        .on_right_press(Message::TreeContextMenu(right_handle, 200.0, 100.0))
+        .on_right_press(Message::TreeContextMenu(right_handle, 200.0, 100.0, 800.0, 600.0))
         .into()
 }
 

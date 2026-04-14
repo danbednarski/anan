@@ -592,7 +592,7 @@ impl canvas::Program<Message> for FamilyTreeProgram {
                     if pos.x >= card.x && pos.x <= card.x + CARD_W
                         && pos.y >= card.y && pos.y <= card.y + CARD_H
                     {
-                        return (canvas::event::Status::Captured, Some(Message::TreeContextMenu(card.handle.clone(), pos.x, pos.y)));
+                        return (canvas::event::Status::Captured, Some(Message::TreeContextMenu(card.handle.clone(), pos.x, pos.y, bounds.width, bounds.height)));
                     }
                 }
                 (canvas::event::Status::Ignored, None)

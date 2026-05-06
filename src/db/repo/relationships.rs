@@ -257,6 +257,37 @@ pub fn add_sibling(
     Ok(sibling)
 }
 
+/// Link an already-existing child Person into a specific Family.
+///
+/// Updates both the family's `child_ref_list` and the child's
+/// `parent_family_list`, so the bidirectional reference is consistent.
+/// No-op if the child is already in the family. Marks the relationship
+/// type as Birth on both sides — for adopted/step/foster relationships,
+/// edit the resulting `ChildRef.frel`/`mrel` afterwards.
+pub fn link_child_to_family(
+    txn: &Transaction,
+    family_handle: &str,
+    child_handle: &str,
+) -> Result<()> {
+    append_child_to_family(txn, family_handle, child_handle)?;
+
+    let mut child: Person = {
+        let j: String = txn
+            .query_row(
+                "SELECT json_data FROM person WHERE handle = ?1",
+                params![child_handle],
+                |r| r.get(0),
+            )
+            .with_context(|| format!("load child {child_handle}"))?;
+        serde_json::from_str(&j).context("parse child")?
+    };
+    if !child.parent_family_list.iter().any(|h| h == family_handle) {
+        child.parent_family_list.push(family_handle.to_string());
+        person_repo::save_row(txn, &mut child)?;
+    }
+    Ok(())
+}
+
 /// Append a child ref to a family's `child_ref_list` and rewrite the
 /// family row.
 fn append_child_to_family(txn: &Transaction, family_handle: &str, child_handle: &str) -> Result<()> {

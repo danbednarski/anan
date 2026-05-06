@@ -32,11 +32,11 @@ const PADDING: f32 = 40.0;
 struct CardInfo {
     x: f32, y: f32,
     name: String, detail: String, gramps_id: String,
-    gender: i32, is_home: bool, handle: String,
+    gender: i32, is_home: bool, in_lineage: bool, handle: String,
 }
 
 #[derive(Clone)]
-struct Conn { from: Point, to: Point }
+struct Conn { from: Point, to: Point, highlighted: bool }
 
 pub struct TreeLayout {
     cards: Vec<CardInfo>,
@@ -115,12 +115,17 @@ pub fn compute_layout_personal(snap: &Snapshot, home_handle: &str) -> TreeLayout
     lineage.insert(home_handle.to_string());
     collect_ancestors(snap, home_handle, &mut lineage);
     collect_descendants_handles(snap, home_handle, &mut lineage);
-    // Add spouses.
+    // Add spouses - but only from families that are on the direct path.
+    // A family is relevant if the person IS the home person (always show
+    // their marriages) or the family has at least one child in the lineage.
     let mut spouses = Vec::new();
     for h in lineage.iter() {
         if let Some(p) = snap.person(h) {
             for fh in &p.family_list {
                 if let Some(fam) = snap.family(fh) {
+                    let dominated = h == home_handle
+                        || fam.child_ref_list.iter().any(|cr| lineage.contains(&cr.r#ref));
+                    if !dominated { continue; }
                     if let Some(ref s) = fam.father_handle { if s != h { spouses.push(s.clone()); } }
                     if let Some(ref s) = fam.mother_handle { if s != h { spouses.push(s.clone()); } }
                 }
@@ -158,6 +163,41 @@ fn collect_descendants_handles(snap: &Snapshot, handle: &str, out: &mut HashSet<
     }
 }
 
+/// Collect the "lineage" set: home person + ancestors + descendants +
+/// siblings + spouses of all of the above. Connections between these
+/// people get highlighted; everyone else is dimmed.
+fn collect_lineage(snap: &Snapshot, home_handle: &str, scope: &HashSet<String>) -> HashSet<String> {
+    let mut lineage: HashSet<String> = HashSet::new();
+    lineage.insert(home_handle.to_string());
+    collect_ancestors(snap, home_handle, &mut lineage);
+    collect_descendants_handles(snap, home_handle, &mut lineage);
+    // Siblings: other children of home's parent families.
+    if let Some(person) = snap.person(home_handle) {
+        for pfh in &person.parent_family_list {
+            if let Some(fam) = snap.family(pfh) {
+                for cr in &fam.child_ref_list {
+                    if scope.contains(&cr.r#ref) {
+                        lineage.insert(cr.r#ref.clone());
+                    }
+                }
+            }
+        }
+    }
+    // Spouses of everyone in lineage so far.
+    let current: Vec<String> = lineage.iter().cloned().collect();
+    for h in &current {
+        if let Some(p) = snap.person(h) {
+            for fh in &p.family_list {
+                if let Some(fam) = snap.family(fh) {
+                    if let Some(ref s) = fam.father_handle { if scope.contains(s) { lineage.insert(s.clone()); } }
+                    if let Some(ref s) = fam.mother_handle { if scope.contains(s) { lineage.insert(s.clone()); } }
+                }
+            }
+        }
+    }
+    lineage
+}
+
 /// Core layout: assign positions using generation rows.
 fn build_layout(
     snap: &Snapshot,
@@ -165,6 +205,8 @@ fn build_layout(
     scope: &HashSet<String>,
     gen_map: &HashMap<String, i32>,
 ) -> TreeLayout {
+    let lineage = collect_lineage(snap, home_handle, scope);
+
     // Group people by generation.
     let mut by_gen: HashMap<i32, Vec<String>> = HashMap::new();
     for (handle, g) in gen_map {
@@ -176,74 +218,133 @@ fn build_layout(
     let mut sorted_gens: Vec<i32> = by_gen.keys().copied().collect();
     sorted_gens.sort();
 
-    // For each generation, order people: couples together, children
-    // roughly grouped under their parents.
-    // First pass: figure out couple groupings within each generation.
+    // person_x: last-write-wins position per person (used for child sort keys
+    // and single-person card positions).
+    // family_pos: (father_x, mother_x) per family handle - the authoritative
+    // position for each couple appearance. This is what fixes remarriage:
+    // a person in 2 families gets 2 entries here with different x values.
     let mut person_x: HashMap<String, f32> = HashMap::new();
+    let mut family_pos: HashMap<String, (f32, f32)> = HashMap::new();
+
+    let mut cards: Vec<CardInfo> = Vec::new();
 
     for (gen_idx, gen) in sorted_gens.iter().enumerate() {
         let people = &by_gen[gen];
         let y = PADDING + (gen_idx as f32) * (CARD_H + GEN_GAP);
 
         // Find couples within this generation.
-        let mut paired: HashSet<String> = HashSet::new();
+        let mut placed_couples: HashSet<(String, String)> = HashSet::new();
         let mut ordered: Vec<OrderedItem> = Vec::new();
+        let mut in_couple: HashSet<String> = HashSet::new();
 
         for fam in &snap.families {
             let fh = fam.father_handle.as_ref().filter(|h| people.contains(h));
             let mh = fam.mother_handle.as_ref().filter(|h| people.contains(h));
             if let (Some(f), Some(m)) = (fh, mh) {
-                // Allow a person to appear in multiple couples (Gramps-style).
-                // Only skip if BOTH partners are already paired together.
-                if paired.contains(f) && paired.contains(m) { continue; }
-                // Position couple near their parents from the generation above.
+                let pair = (f.clone(), m.clone());
+                if placed_couples.contains(&pair) { continue; }
+                placed_couples.insert(pair);
+                in_couple.insert(f.clone());
+                in_couple.insert(m.clone());
                 let k1 = parent_center_x(snap, f, &person_x);
                 let k2 = parent_center_x(snap, m, &person_x);
                 let sort_key = if k1 < f32::MAX && k2 < f32::MAX { (k1 + k2) / 2.0 }
                     else if k1 < f32::MAX { k1 }
                     else { k2 };
-                ordered.push(OrderedItem::Couple(f.clone(), m.clone(), sort_key));
+                // Place partner whose parents are further left on the left
+                // side, so connector lines don't cross unnecessarily.
+                let (left, right) = if k2 < k1 { (m.clone(), f.clone()) } else { (f.clone(), m.clone()) };
+                ordered.push(OrderedItem::Couple(left, right, fam.handle.clone(), sort_key));
             }
         }
 
-        // Singles (not paired).
+        // Singles (not in any couple in this gen).
         for h in people {
-            if !paired.contains(h) {
+            if !in_couple.contains(h) {
                 let sort_key = parent_center_x(snap, h, &person_x);
                 ordered.push(OrderedItem::Single(h.clone(), sort_key));
             }
         }
 
-        // Sort by hint.
-        ordered.sort_by(|a, b| a.sort_key().partial_cmp(&b.sort_key()).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort: lineage items first (they'll cluster in the center after
+        // the post-layout centering pass), then by parent position hint.
+        ordered.sort_by(|a, b| {
+            let a_lin = a.has_lineage(&lineage);
+            let b_lin = b.has_lineage(&lineage);
+            // Lineage items sort before non-lineage.
+            match (a_lin, b_lin) {
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
+                _ => {}
+            }
+            a.sort_key().partial_cmp(&b.sort_key()).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        // Assign x positions.
+        // Assign x positions and build cards.
         let mut x = PADDING;
         for item in &ordered {
             match item {
-                OrderedItem::Couple(f, m, _) => {
-                    person_x.insert(f.clone(), x);
-                    person_x.insert(m.clone(), x + CARD_W + COUPLE_GAP);
+                OrderedItem::Couple(f, m, fam_handle, _) => {
+                    let fx = x;
+                    let mx = x + CARD_W + COUPLE_GAP;
+                    family_pos.insert(fam_handle.clone(), (fx, mx));
+                    person_x.insert(f.clone(), fx);
+                    person_x.insert(m.clone(), mx);
+                    if let Some(person) = snap.person(f) {
+                        cards.push(make_card(&person, snap, home_handle, &lineage, fx, y));
+                    }
+                    if let Some(person) = snap.person(m) {
+                        cards.push(make_card(&person, snap, home_handle, &lineage, mx, y));
+                    }
                     x += CARD_W * 2.0 + COUPLE_GAP + H_GAP;
                 }
                 OrderedItem::Single(h, _) => {
                     person_x.insert(h.clone(), x);
+                    if let Some(person) = snap.person(h) {
+                        cards.push(make_card(&person, snap, home_handle, &lineage, x, y));
+                    }
                     x += CARD_W + H_GAP;
                 }
             }
         }
     }
 
-    // Build cards.
-    let mut cards: Vec<CardInfo> = Vec::new();
-    for (gen_idx, gen) in sorted_gens.iter().enumerate() {
-        let y = PADDING + (gen_idx as f32) * (CARD_H + GEN_GAP);
-        let people = &by_gen[gen];
-        for h in people {
-            let Some(person) = snap.person(h) else { continue };
-            let x = person_x.get(h).copied().unwrap_or(0.0);
-            cards.push(make_card(person, snap, home_handle, x, y));
+    // Post-layout centering: shift everything so the lineage's horizontal
+    // center aligns with the overall canvas center.
+    let lineage_xs: Vec<f32> = cards.iter()
+        .filter(|c| c.in_lineage)
+        .map(|c| c.x + CARD_W / 2.0)
+        .collect();
+    if !lineage_xs.is_empty() {
+        let lineage_center = lineage_xs.iter().sum::<f32>() / lineage_xs.len() as f32;
+        let all_max_x = cards.iter().map(|c| c.x + CARD_W).fold(0.0f32, f32::max) + PADDING;
+        let canvas_center = all_max_x / 2.0;
+        let shift = canvas_center - lineage_center;
+        // Only shift if it wouldn't push anything off the left edge.
+        let min_x = cards.iter().map(|c| c.x).fold(f32::MAX, f32::min);
+        let clamped_shift = shift.max(PADDING - min_x);
+        if clamped_shift.abs() > 1.0 {
+            for card in &mut cards {
+                card.x += clamped_shift;
+            }
+            for (_, (fx, mx)) in &mut family_pos {
+                *fx += clamped_shift;
+                *mx += clamped_shift;
+            }
+            for (_, px) in &mut person_x {
+                *px += clamped_shift;
+            }
         }
+    }
+
+    // Normalize: ensure leftmost card starts at PADDING (no dead space
+    // on the left from the centering shift).
+    let final_min = cards.iter().map(|c| c.x).fold(f32::MAX, f32::min);
+    if final_min > PADDING + 1.0 {
+        let norm = PADDING - final_min;
+        for card in &mut cards { card.x += norm; }
+        for (_, (fx, mx)) in &mut family_pos { *fx += norm; *mx += norm; }
+        for (_, px) in &mut person_x { *px += norm; }
     }
 
     // Build connections: for each family, draw from couple junction to children.
@@ -252,62 +353,59 @@ fn build_layout(
         let fh = fam.father_handle.as_ref().filter(|h| scope.contains(*h));
         let mh = fam.mother_handle.as_ref().filter(|h| scope.contains(*h));
 
-        // Couple connector: draw between adjacent partners.
-        if let (Some(f), Some(m)) = (fh, mh) {
-            if let (Some(&fx), Some(&mx)) = (person_x.get(f), person_x.get(m)) {
-                let fg = gen_map.get(f).copied().unwrap_or(0);
+        // Couple connector: use family_pos for this specific family's positions.
+        if let (Some(_f), Some(_m)) = (fh, mh) {
+            if let Some(&(fx, mx)) = family_pos.get(&fam.handle) {
+                let fg = gen_map.get(_f).copied().unwrap_or(0);
                 let gen_idx = sorted_gens.iter().position(|g| *g == fg).unwrap_or(0);
                 let y = PADDING + (gen_idx as f32) * (CARD_H + GEN_GAP) + CARD_H / 2.0;
-                // Use the pair that's closest (in case of duplicate entries).
                 let (left, right) = if fx < mx { (fx, mx) } else { (mx, fx) };
+                let hl = lineage.contains(_f) || lineage.contains(_m);
                 conns.push(Conn {
                     from: Point::new(left + CARD_W, y),
                     to: Point::new(right, y),
+                    highlighted: hl,
                 });
             }
         }
 
-        // Parent → child connections.
-        // Only draw when parents are in adjacent generation to children.
+        // Parent -> child connections.
         let parent_handle = fh.or(mh);
         let Some(ph) = parent_handle else { continue };
         let parent_gen = gen_map.get(ph).copied().unwrap_or(0);
         let parent_gen_idx = sorted_gens.iter().position(|g| *g == parent_gen).unwrap_or(0);
         let parent_y = PADDING + (parent_gen_idx as f32) * (CARD_H + GEN_GAP);
 
-        // Junction: midpoint between couple cards if they're close together.
-        // If parents are far apart, use each parent's card center individually.
-        let (fx_opt, mx_opt) = (
-            fh.and_then(|f| person_x.get(f).copied()),
-            mh.and_then(|m| person_x.get(m).copied()),
-        );
-        let junction_x = match (fx_opt, mx_opt) {
-            (Some(fx), Some(mx)) => {
-                let gap = (mx - fx - CARD_W).abs();
-                if gap < CARD_W {
-                    // Adjacent couple: junction between them.
-                    (fx + CARD_W + mx) / 2.0
-                } else {
-                    // Far apart: use the parent that's in this family.
-                    fx + CARD_W / 2.0
-                }
+        // Junction: use family_pos if available, else fall back to person_x.
+        let junction_x = if let Some(&(fx, mx)) = family_pos.get(&fam.handle) {
+            (fx + CARD_W + mx) / 2.0
+        } else {
+            let (fx_opt, mx_opt) = (
+                fh.and_then(|f| person_x.get(f).copied()),
+                mh.and_then(|m| person_x.get(m).copied()),
+            );
+            match (fx_opt, mx_opt) {
+                (Some(fx), _) => fx + CARD_W / 2.0,
+                (_, Some(mx)) => mx + CARD_W / 2.0,
+                (None, None) => continue,
             }
-            (Some(fx), None) => fx + CARD_W / 2.0,
-            (None, Some(mx)) => mx + CARD_W / 2.0,
-            (None, None) => continue,
         };
         let junction = Point::new(junction_x, parent_y + CARD_H);
+
+        // Is at least one parent in the lineage?
+        let parent_in_lineage = fh.map_or(false, |h| lineage.contains(h))
+            || mh.map_or(false, |h| lineage.contains(h));
 
         for cr in &fam.child_ref_list {
             if !scope.contains(&cr.r#ref) { continue; }
             let Some(&cx) = person_x.get(&cr.r#ref) else { continue };
             let child_gen = gen_map.get(&cr.r#ref).copied().unwrap_or(0);
-            // Only connect to children in the next generation.
             if child_gen != parent_gen + 1 { continue; }
             let child_gen_idx = sorted_gens.iter().position(|g| *g == child_gen).unwrap_or(0);
             let child_y = PADDING + (child_gen_idx as f32) * (CARD_H + GEN_GAP);
             let child_top = Point::new(cx + CARD_W / 2.0, child_y);
-            conns.push(Conn { from: junction, to: child_top });
+            let hl = parent_in_lineage && lineage.contains(&cr.r#ref);
+            conns.push(Conn { from: junction, to: child_top, highlighted: hl });
         }
     }
 
@@ -322,15 +420,21 @@ fn build_layout(
 }
 
 enum OrderedItem {
-    Couple(String, String, f32),
+    Couple(String, String, String, f32), // father, mother, family_handle, sort_key
     Single(String, f32),
 }
 
 impl OrderedItem {
     fn sort_key(&self) -> f32 {
         match self {
-            OrderedItem::Couple(_, _, k) => *k,
+            OrderedItem::Couple(_, _, _, k) => *k,
             OrderedItem::Single(_, k) => *k,
+        }
+    }
+    fn has_lineage(&self, lineage: &HashSet<String>) -> bool {
+        match self {
+            OrderedItem::Couple(f, m, _, _) => lineage.contains(f) || lineage.contains(m),
+            OrderedItem::Single(h, _) => lineage.contains(h),
         }
     }
 }
@@ -360,7 +464,7 @@ fn parent_center_x(
 
 fn make_card(
     person: &crate::gramps::Person, snap: &Snapshot,
-    home_handle: &str, x: f32, y: f32,
+    home_handle: &str, lineage: &HashSet<String>, x: f32, y: f32,
 ) -> CardInfo {
     let birth = if person.birth_ref_index >= 0 {
         person.event_ref_list.get(person.birth_ref_index as usize)
@@ -390,6 +494,7 @@ fn make_card(
         detail, gramps_id: person.gramps_id.clone(),
         gender: person.gender,
         is_home: person.handle == home_handle,
+        in_lineage: lineage.contains(&person.handle),
         handle: person.handle.clone(),
     }
 }
@@ -417,11 +522,13 @@ impl canvas::Program<Message> for FamilyTreeProgram {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
 
-        for conn in &self.layout.conns {
+        // Draw non-highlighted connections first (behind).
+        for conn in self.layout.conns.iter().filter(|c| !c.highlighted) {
+            let color = Color::from_rgba(0.78, 0.81, 0.82, 0.35);
             let is_horiz = (conn.from.y - conn.to.y).abs() < 1.0;
             if is_horiz {
                 let path = Path::line(conn.from, conn.to);
-                frame.stroke(&path, Stroke::default().with_color(theme::ACCENT).with_width(2.0));
+                frame.stroke(&path, Stroke::default().with_color(color).with_width(1.0));
             } else {
                 let mid_y = (conn.from.y + conn.to.y) / 2.0;
                 let path = Path::new(|b| {
@@ -432,7 +539,26 @@ impl canvas::Program<Message> for FamilyTreeProgram {
                         conn.to,
                     );
                 });
-                frame.stroke(&path, Stroke::default().with_color(theme::CONNECTOR).with_width(1.5));
+                frame.stroke(&path, Stroke::default().with_color(color).with_width(1.0));
+            }
+        }
+        // Draw highlighted connections on top.
+        for conn in self.layout.conns.iter().filter(|c| c.highlighted) {
+            let is_horiz = (conn.from.y - conn.to.y).abs() < 1.0;
+            if is_horiz {
+                let path = Path::line(conn.from, conn.to);
+                frame.stroke(&path, Stroke::default().with_color(theme::ACCENT).with_width(3.0));
+            } else {
+                let mid_y = (conn.from.y + conn.to.y) / 2.0;
+                let path = Path::new(|b| {
+                    b.move_to(conn.from);
+                    b.bezier_curve_to(
+                        Point::new(conn.from.x, mid_y),
+                        Point::new(conn.to.x, mid_y),
+                        conn.to,
+                    );
+                });
+                frame.stroke(&path, Stroke::default().with_color(theme::ACCENT).with_width(2.5));
             }
         }
 
@@ -466,7 +592,7 @@ impl canvas::Program<Message> for FamilyTreeProgram {
                     if pos.x >= card.x && pos.x <= card.x + CARD_W
                         && pos.y >= card.y && pos.y <= card.y + CARD_H
                     {
-                        return (canvas::event::Status::Captured, Some(Message::TreeContextMenu(card.handle.clone())));
+                        return (canvas::event::Status::Captured, Some(Message::TreeContextMenu(card.handle.clone(), pos.x, pos.y, bounds.width, bounds.height)));
                     }
                 }
                 (canvas::event::Status::Ignored, None)
@@ -477,9 +603,16 @@ impl canvas::Program<Message> for FamilyTreeProgram {
 }
 
 fn draw_card(frame: &mut Frame, card: &CardInfo) {
-    let bg = if card.is_home { theme::HOME_BG } else { theme::CARD };
-    let text_color = if card.is_home { Color::WHITE } else { theme::TEXT };
-    let border_color = if card.is_home { theme::PRIMARY } else { theme::BORDER };
+    let (bg, text_color, border_color) = if card.is_home {
+        (theme::HOME_BG, Color::WHITE, theme::PRIMARY)
+    } else if card.in_lineage {
+        (theme::CARD, theme::TEXT, theme::ACCENT)
+    } else {
+        // Dimmed card but keep text readable.
+        (Color::from_rgba(1.0, 1.0, 1.0, 0.45),
+         Color::from_rgba(0.18, 0.20, 0.21, 0.75),
+         Color::from_rgba(0.875, 0.902, 0.914, 0.45))
+    };
 
     let rect = Path::rectangle(Point::new(card.x, card.y), Size::new(CARD_W, CARD_H));
     frame.fill(&rect, bg);

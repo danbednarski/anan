@@ -354,6 +354,99 @@ pub fn add_child_existing(
     Ok(())
 }
 
+/// Wire an existing child into a family, optionally specifying the
+/// other parent. If `other_parent_handle` is provided, look for an
+/// existing family where both parents match; if none exists, create one.
+pub fn add_child_with_parents(
+    txn: &Transaction,
+    parent_handle: &str,
+    child_handle: &str,
+    other_parent_handle: Option<&str>,
+) -> Result<()> {
+    let parent_json: String = txn
+        .query_row(
+            "SELECT json_data FROM person WHERE handle = ?1",
+            params![parent_handle],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("load parent {parent_handle}"))?;
+    let parent: Person =
+        serde_json::from_str(&parent_json).context("parse parent")?;
+
+    let family_handle = if let Some(other_h) = other_parent_handle {
+        // Find an existing family with both parents.
+        let mut found: Option<String> = None;
+        for fh in &parent.family_list {
+            let j: String = txn
+                .query_row(
+                    "SELECT json_data FROM family WHERE handle = ?1",
+                    params![fh],
+                    |r| r.get(0),
+                )
+                .with_context(|| format!("load family {fh}"))?;
+            let fam: Family = serde_json::from_str(&j).context("parse family")?;
+            let has_other = fam.father_handle.as_deref() == Some(other_h)
+                || fam.mother_handle.as_deref() == Some(other_h);
+            if has_other {
+                found = Some(fh.clone());
+                break;
+            }
+        }
+        if let Some(fh) = found {
+            fh
+        } else {
+            // Create a new family with both parents.
+            let other_json: String = txn
+                .query_row(
+                    "SELECT json_data FROM person WHERE handle = ?1",
+                    params![other_h],
+                    |r| r.get(0),
+                )
+                .with_context(|| format!("load other parent {other_h}"))?;
+            let other: Person = serde_json::from_str(&other_json)?;
+            let (father, mother) = match (parent.gender, other.gender) {
+                (0, _) => (Some(other_h.to_string()), Some(parent_handle.to_string())),
+                (_, 0) => (Some(parent_handle.to_string()), Some(other_h.to_string())),
+                (1, _) => (Some(parent_handle.to_string()), Some(other_h.to_string())),
+                _ => (Some(parent_handle.to_string()), Some(other_h.to_string())),
+            };
+            let fam = family_repo::create(txn, father, mother, 0)?;
+            fam.handle
+        }
+    } else {
+        // No other parent specified - use existing logic.
+        if let Some(fh) = parent.family_list.first().cloned() {
+            fh
+        } else {
+            let (father, mother) = if parent.gender == 0 {
+                (None, Some(parent_handle.to_string()))
+            } else {
+                (Some(parent_handle.to_string()), None)
+            };
+            let fam = family_repo::create(txn, father, mother, 0)?;
+            fam.handle
+        }
+    };
+
+    append_child_to_family(txn, &family_handle, child_handle)?;
+
+    let mut child: Person = {
+        let j: String = txn
+            .query_row(
+                "SELECT json_data FROM person WHERE handle = ?1",
+                params![child_handle],
+                |r| r.get(0),
+            )
+            .context("reload child")?;
+        serde_json::from_str(&j).context("parse child")?
+    };
+    if !child.parent_family_list.iter().any(|h| h == &family_handle) {
+        child.parent_family_list.push(family_handle);
+        person_repo::save_row(txn, &mut child)?;
+    }
+    Ok(())
+}
+
 /// Wire an existing person as parent of `person_handle`.
 pub fn add_parent_existing(
     txn: &Transaction,

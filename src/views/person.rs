@@ -226,21 +226,21 @@ pub fn edit_view<'a>(draft: &'a PersonDraft, creating: bool) -> Element<'a, Mess
     .spacing(4);
 
     let birth_field = column![
-        text("Birth year (leave blank for unknown)")
+        text("Birth date (e.g. 20 Jan 1992, Jan 1992, or 1992)")
             .size(11)
             .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        text_input("e.g. 1890", &draft.birth_year_s)
-            .on_input(Message::EditPersonBirthYear)
+        text_input("e.g. 20 Jan 1992", &draft.birth_date_s)
+            .on_input(Message::EditPersonBirthDate)
             .padding(6),
     ]
     .spacing(4);
 
     let death_field = column![
-        text("Death year (leave blank for unknown)")
+        text("Death date (e.g. 9 Dec 2025, Dec 2025, or 2025)")
             .size(11)
             .color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        text_input("e.g. 1965", &draft.death_year_s)
-            .on_input(Message::EditPersonDeathYear)
+        text_input("e.g. 9 Dec 2025", &draft.death_date_s)
+            .on_input(Message::EditPersonDeathDate)
             .padding(6),
     ]
     .spacing(4);

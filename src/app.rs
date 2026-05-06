@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
-use iced::widget::{button, column, container, pick_list, row, scrollable, stack, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, stack, text, text_input, Column};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
 
 use crate::db::{repo as dbrepo, Database, Snapshot};
@@ -137,6 +137,8 @@ pub struct App {
     /// right-clicked in the tree. While Some, the context bar renders
     /// action buttons for that person.
     context_target: Option<String>,
+    context_pos: (f32, f32),
+    context_viewport: (f32, f32),
 
     /// Modal form for adding a new person with a relationship. While
     /// Some, an overlay appears on top of the tree with name/gender/
@@ -200,11 +202,19 @@ pub struct PendingAdd {
     pub first_name: String,
     pub surname: String,
     pub gender_s: String,
-    pub birth_year_s: String,
-    pub death_year_s: String,
+    pub birth_date_s: String,
+    pub death_date_s: String,
     /// Optional source URL/description. When non-empty, a Source +
     /// Citation are auto-created and attached to the new person.
     pub source_url: String,
+    /// Search query for linking an existing person instead of creating.
+    pub search_existing: String,
+    /// When set, link this existing person instead of creating a new one.
+    pub existing_handle: Option<String>,
+    /// Search for other parent when adding a child.
+    pub other_parent_search: String,
+    /// When set, specifies the other parent for a new child.
+    pub other_parent_handle: Option<String>,
 }
 
 /// One open edit — either a brand-new object that hasn't been saved
@@ -295,10 +305,10 @@ pub struct PersonDraft {
     pub surname: String,
     /// Gender as a string: 0 female, 1 male, 2 unknown. Parsed on save.
     pub gender_s: String,
-    /// Empty string = "no birth year"; otherwise parsed as i32.
-    pub birth_year_s: String,
-    /// Empty string = "no death year"; otherwise parsed as i32.
-    pub death_year_s: String,
+    /// Date string: "20 Jan 1992", "Jan 1992", or "1992". Blank = unknown.
+    pub birth_date_s: String,
+    /// Date string: "20 Jan 1992", "Jan 1992", or "1992". Blank = unknown.
+    pub death_date_s: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -375,7 +385,7 @@ pub enum Message {
     /// Click a person card in the tree → re-home on that person.
     TreeHome(String),
     /// Right-click a person card → open context menu for that person.
-    TreeContextMenu(String),
+    TreeContextMenu(String, f32, f32, f32, f32),
     /// Dismiss the context menu.
     TreeDismissContext,
     /// User picked an action from the context menu → open the add-person
@@ -389,9 +399,15 @@ pub enum Message {
     AddFirstName(String),
     AddSurname(String),
     AddGender(String),
-    AddBirthYear(String),
-    AddDeathYear(String),
+    AddBirthDate(String),
+    AddDeathDate(String),
     AddSourceUrl(String),
+    AddSearchExisting(String),
+    AddPickExisting(String),
+    AddClearExisting,
+    AddOtherParentSearch(String),
+    AddPickOtherParent(String),
+    AddClearOtherParent,
     /// Toggle sidebar visibility.
     ToggleSidebar,
     /// Toggle the "Browse all" section in the sidebar.
@@ -408,6 +424,8 @@ pub enum Message {
     StartCreate(View),
     /// Start editing the selected object in the given view.
     StartEditSelected,
+    /// Start editing a specific person by handle (from context menu).
+    StartEditPerson(String),
     /// Drop the current edit session without saving.
     CancelEdit,
     /// Commit the current edit session to the database.
@@ -432,8 +450,8 @@ pub enum Message {
     EditPersonFirstName(String),
     EditPersonSurname(String),
     EditPersonGender(String),
-    EditPersonBirthYear(String),
-    EditPersonDeathYear(String),
+    EditPersonBirthDate(String),
+    EditPersonDeathDate(String),
     /// User toggled "also delete this person's exclusive events" on
     /// the cascade confirmation banner.
     ToggleDeleteOwnedEvents,
@@ -516,25 +534,20 @@ impl App {
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/sample.db");
         let (loading, initial) = if fixture.exists() {
-            let scratch = std::env::temp_dir().join("gramps-desktop-scratch.db");
-            // Always refresh the scratch copy on launch so developers get
-            // a clean fixture each run. If the copy fails (e.g. /tmp is
-            // non-writable) we fall through to opening the original,
-            // which is a safer failure mode than silently hiding an
-            // error — the user will see the bubble-up.
-            match std::fs::copy(&fixture, &scratch) {
-                Ok(_) => (
-                    true,
-                    Task::perform(load_async(scratch), Message::DbOpened),
-                ),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "could not copy fixture to scratch; opening original read-write"
-                    );
-                    (true, Task::perform(load_async(fixture), Message::DbOpened))
+            let scratch = std::env::temp_dir().join("anan-scratch.db");
+            // Only seed the scratch copy if it doesn't already exist.
+            // This preserves user edits between sessions. To reset to
+            // the clean fixture, delete the scratch file manually.
+            if !scratch.exists() {
+                if let Err(e) = std::fs::copy(&fixture, &scratch) {
+                    tracing::warn!(error = %e, "could not seed scratch db from fixture");
                 }
             }
+            let path = if scratch.exists() { scratch } else { fixture };
+            (
+                true,
+                Task::perform(load_async(path), Message::DbOpened),
+            )
         } else {
             (false, Task::none())
         };
@@ -559,6 +572,8 @@ impl App {
                 edit: None,
                 delete_confirm: None,
                 context_target: None,
+                context_pos: (0.0, 0.0),
+                context_viewport: (800.0, 600.0),
                 pending_add: None,
                 sidebar_visible: false,
                 browse_expanded: false,
@@ -675,8 +690,10 @@ impl App {
                 self.home_person = Some(handle);
                 Task::none()
             }
-            Message::TreeContextMenu(handle) => {
+            Message::TreeContextMenu(handle, x, y, vw, vh) => {
                 self.context_target = Some(handle);
+                self.context_pos = (x, y);
+                self.context_viewport = (vw, vh);
                 Task::none()
             }
             Message::TreeDismissContext => {
@@ -713,9 +730,13 @@ impl App {
                     first_name: String::new(),
                     surname,
                     gender_s: rel.default_gender().to_string(),
-                    birth_year_s: String::new(),
-                    death_year_s: String::new(),
+                    birth_date_s: String::new(),
+                    death_date_s: String::new(),
                     source_url: String::new(),
+                    search_existing: String::new(),
+                    existing_handle: None,
+                    other_parent_search: String::new(),
+                    other_parent_handle: None,
                 });
                 Task::none()
             }
@@ -752,15 +773,55 @@ impl App {
                 }
                 Task::none()
             }
-            Message::AddBirthYear(v) => {
+            Message::AddBirthDate(v) => {
                 if let Some(a) = self.pending_add.as_mut() {
-                    a.birth_year_s = v;
+                    a.birth_date_s = v;
                 }
                 Task::none()
             }
-            Message::AddDeathYear(v) => {
+            Message::AddDeathDate(v) => {
                 if let Some(a) = self.pending_add.as_mut() {
-                    a.death_year_s = v;
+                    a.death_date_s = v;
+                }
+                Task::none()
+            }
+            Message::AddSearchExisting(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.search_existing = v;
+                    a.existing_handle = None;
+                }
+                Task::none()
+            }
+            Message::AddPickExisting(handle) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.existing_handle = Some(handle);
+                    a.search_existing.clear();
+                }
+                Task::none()
+            }
+            Message::AddClearExisting => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.existing_handle = None;
+                }
+                Task::none()
+            }
+            Message::AddOtherParentSearch(v) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.other_parent_search = v;
+                    a.other_parent_handle = None;
+                }
+                Task::none()
+            }
+            Message::AddPickOtherParent(handle) => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.other_parent_handle = Some(handle);
+                    a.other_parent_search.clear();
+                }
+                Task::none()
+            }
+            Message::AddClearOtherParent => {
+                if let Some(a) = self.pending_add.as_mut() {
+                    a.other_parent_handle = None;
                 }
                 Task::none()
             }
@@ -817,6 +878,53 @@ impl App {
             Message::StartEditSelected => {
                 self.delete_confirm = None;
                 self.edit = self.populate_edit_from_selection();
+                Task::none()
+            }
+            Message::StartEditPerson(handle) => {
+                self.context_target = None;
+                if let Some(snap) = &self.snapshot {
+                    if let Some(p) = snap.person(&handle) {
+                        let surname = p
+                            .primary_name
+                            .surname_list
+                            .iter()
+                            .find(|s| s.primary)
+                            .or_else(|| p.primary_name.surname_list.first())
+                            .map(|s| s.surname.clone())
+                            .unwrap_or_default();
+                        let birth_date_s = if p.birth_ref_index >= 0 {
+                            p.event_ref_list
+                                .get(p.birth_ref_index as usize)
+                                .and_then(|er| snap.event(&er.r#ref))
+                                .and_then(|e| e.date.as_ref())
+                                .map(format_date_for_edit)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let death_date_s = if p.death_ref_index >= 0 {
+                            p.event_ref_list
+                                .get(p.death_ref_index as usize)
+                                .and_then(|er| snap.event(&er.r#ref))
+                                .and_then(|e| e.date.as_ref())
+                                .map(format_date_for_edit)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        self.current = View::Persons;
+                        self.edit = Some(EditSession {
+                            handle: Some(p.handle.clone()),
+                            draft: EditDraft::Person(PersonDraft {
+                                first_name: p.primary_name.first_name.clone(),
+                                surname,
+                                gender_s: p.gender.to_string(),
+                                birth_date_s,
+                                death_date_s,
+                            }),
+                        });
+                    }
+                }
                 Task::none()
             }
             Message::CancelEdit => {
@@ -968,15 +1076,15 @@ impl App {
                 }
                 Task::none()
             }
-            Message::EditPersonBirthYear(v) => {
+            Message::EditPersonBirthDate(v) => {
                 if let Some(EditDraft::Person(d)) = self.draft_mut() {
-                    d.birth_year_s = v;
+                    d.birth_date_s = v;
                 }
                 Task::none()
             }
-            Message::EditPersonDeathYear(v) => {
+            Message::EditPersonDeathDate(v) => {
                 if let Some(EditDraft::Person(d)) = self.draft_mut() {
-                    d.death_year_s = v;
+                    d.death_date_s = v;
                 }
                 Task::none()
             }
@@ -1244,25 +1352,25 @@ impl App {
                     .or_else(|| p.primary_name.surname_list.first())
                     .map(|s| s.surname.clone())
                     .unwrap_or_default();
-                let birth_year = if p.birth_ref_index >= 0 {
+                let birth_date_s = if p.birth_ref_index >= 0 {
                     p.event_ref_list
                         .get(p.birth_ref_index as usize)
                         .and_then(|er| snap.event(&er.r#ref))
                         .and_then(|e| e.date.as_ref())
-                        .map(|d| d.primary_year())
-                        .filter(|y| *y != 0)
+                        .map(format_date_for_edit)
+                        .unwrap_or_default()
                 } else {
-                    None
+                    String::new()
                 };
-                let death_year = if p.death_ref_index >= 0 {
+                let death_date_s = if p.death_ref_index >= 0 {
                     p.event_ref_list
                         .get(p.death_ref_index as usize)
                         .and_then(|er| snap.event(&er.r#ref))
                         .and_then(|e| e.date.as_ref())
-                        .map(|d| d.primary_year())
-                        .filter(|y| *y != 0)
+                        .map(format_date_for_edit)
+                        .unwrap_or_default()
                 } else {
-                    None
+                    String::new()
                 };
                 Some(EditSession {
                     handle: Some(p.handle.clone()),
@@ -1270,12 +1378,8 @@ impl App {
                         first_name: p.primary_name.first_name.clone(),
                         surname,
                         gender_s: p.gender.to_string(),
-                        birth_year_s: birth_year
-                            .map(|y| y.to_string())
-                            .unwrap_or_default(),
-                        death_year_s: death_year
-                            .map(|y| y.to_string())
-                            .unwrap_or_default(),
+                        birth_date_s,
+                        death_date_s,
                     }),
                 })
             }
@@ -1514,8 +1618,16 @@ impl App {
                     }
                     None => detail_ui::empty("No person in tree. Open a DB with people."),
                 };
-                // Use stack for overlays: context menu + modal float above tree.
-                let mut layers: Vec<Element<'_, Message>> = vec![content_body];
+                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
+                if self.sidebar_visible {
+                    main_row = main_row.push(self.nav_column());
+                    main_row = main_row.push(vertical_separator());
+                }
+                main_row = main_row.push(content_body);
+
+                // Context menu and modal float above the entire layout via
+                // a top-level stack so they aren't clipped by the scrollable.
+                let mut layers: Vec<Element<'_, Message>> = vec![main_row.into()];
 
                 if let Some(target) = &self.context_target {
                     let target_name = snap.person(target)
@@ -1528,18 +1640,10 @@ impl App {
                     layers.push(self.add_person_modal(add));
                 }
 
-                let content_stack: Element<'_, Message> = stack(layers)
+                stack(layers)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .into();
-
-                let mut main_row = row![].width(Length::Fill).height(Length::Fill);
-                if self.sidebar_visible {
-                    main_row = main_row.push(self.nav_column());
-                    main_row = main_row.push(vertical_separator());
-                }
-                main_row = main_row.push(content_stack);
-                main_row.into()
+                    .into()
             }
             Some(snap) => {
                 let mut main_row = row![].width(Length::Fill).height(Length::Fill);
@@ -2084,9 +2188,7 @@ impl App {
         search::recompute(snap, &mut self.search);
     }
 
-    /// Floating context menu rendered as an overlay in the top-right
-    /// corner of the tree area. Does NOT push content - it layers on
-    /// top via stack.
+    /// Floating context menu rendered near the right-clicked card.
     fn floating_context_menu<'a>(&'a self, target_name: &str) -> Element<'a, Message> {
         let menu_btn = |label: &'static str, msg: Message| {
             button(text(label).size(12))
@@ -2106,17 +2208,17 @@ impl App {
                 })
         };
 
+        let target_h = self.context_target.clone().unwrap_or_default();
         let menu_card = container(
             column![
                 text(target_name.to_string()).size(13).color(crate::theme::TEXT),
+                menu_btn("Edit", Message::StartEditPerson(target_h.clone())),
                 menu_btn("Add child", Message::TreeStartAdd(AddRelationship::Child)),
                 menu_btn("Add father", Message::TreeStartAdd(AddRelationship::Father)),
                 menu_btn("Add mother", Message::TreeStartAdd(AddRelationship::Mother)),
                 menu_btn("Add sibling", Message::TreeStartAdd(AddRelationship::Sibling)),
                 iced::widget::Space::with_height(4),
-                menu_btn("Center here", Message::TreeHome(
-                    self.context_target.clone().unwrap_or_default()
-                )),
+                menu_btn("Center here", Message::TreeHome(target_h)),
                 menu_btn("Dismiss", Message::TreeDismissContext),
             ]
             .spacing(2)
@@ -2138,14 +2240,52 @@ impl App {
             ..Default::default()
         });
 
-        // Position in top-right corner with some padding.
-        container(menu_card)
+        let (cx, cy) = self.context_pos;
+        let (_vw, vh) = self.context_viewport;
+        let menu_h: f32 = 280.0;
+        let menu_w: f32 = 190.0;
+
+        // Dismiss on clicking the backdrop.
+        let backdrop = button(iced::widget::Space::new(Length::Fill, Length::Fill))
+            .on_press(Message::TreeDismissContext)
+            .style(|_: &Theme, _| button::Style {
+                background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+                text_color: iced::Color::TRANSPARENT,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+            })
             .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::End)
-            .align_y(Alignment::Start)
-            .padding([48, 16])
-            .into()
+            .height(Length::Fill);
+
+        // Flip menu above the click if it would extend past the bottom.
+        let top = if cy + menu_h > vh {
+            (cy - menu_h).max(0.0)
+        } else {
+            cy
+        };
+        // Flip left if it would extend past the right edge.
+        let left = if cx + menu_w > _vw {
+            (cx - menu_w).max(0.0)
+        } else {
+            cx
+        };
+
+        stack![
+            backdrop,
+            column![
+                iced::widget::Space::with_height(Length::Fixed(top)),
+                row![
+                    iced::widget::Space::with_width(Length::Fixed(left)),
+                    menu_card,
+                ],
+                iced::widget::Space::with_height(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     /// Modal overlay for the add-person form. Renders on top of the
@@ -2209,20 +2349,20 @@ impl App {
         .spacing(4);
 
         let birth_field = column![
-            label("Birth year (blank for unknown)"),
-            text_input("e.g. 1890", &add.birth_year_s)
-                .on_input(Message::AddBirthYear)
+            label("Birth date (blank for unknown)"),
+            text_input("e.g. 20 Jan 1992, Jan 1992, or 1992", &add.birth_date_s)
+                .on_input(Message::AddBirthDate)
                 .padding(6)
-                .width(Length::Fixed(120.0)),
+                .width(Length::Fixed(200.0)),
         ]
         .spacing(4);
 
         let death_field = column![
-            label("Death year (blank for unknown)"),
-            text_input("e.g. 1965", &add.death_year_s)
-                .on_input(Message::AddDeathYear)
+            label("Death date (blank for unknown)"),
+            text_input("e.g. 9 Dec 2025, Dec 2025, or 2025", &add.death_date_s)
+                .on_input(Message::AddDeathDate)
                 .padding(6)
-                .width(Length::Fixed(120.0)),
+                .width(Length::Fixed(200.0)),
         ]
         .spacing(4);
 
@@ -2234,23 +2374,160 @@ impl App {
         ]
         .spacing(4);
 
+        // Search for existing person to link instead of creating.
+        let mut search_section: Column<'_, Message> = column![].spacing(4);
+        if let Some(ref existing_h) = add.existing_handle {
+            let existing_name = self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.person(existing_h))
+                .map(|p| p.primary_name.display())
+                .unwrap_or_else(|| existing_h.clone());
+            search_section = search_section
+                .push(label("Linking existing person:"))
+                .push(
+                    row![
+                        text(existing_name).size(13),
+                        button(text("Clear").size(11))
+                            .on_press(Message::AddClearExisting)
+                            .padding(4),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+        } else {
+            search_section = search_section
+                .push(label("Or search for an existing person"))
+                .push(
+                    text_input("Search by name...", &add.search_existing)
+                        .on_input(Message::AddSearchExisting)
+                        .padding(6),
+                );
+            // Show search results.
+            if add.search_existing.len() >= 2 {
+                if let Some(snap) = &self.snapshot {
+                    let query = add.search_existing.to_lowercase();
+                    let mut results: Vec<_> = snap
+                        .persons
+                        .iter()
+                        .filter(|p| {
+                            let name = p.primary_name.display().to_lowercase();
+                            name.contains(&query)
+                        })
+                        .take(6)
+                        .collect();
+                    results.sort_by(|a, b| {
+                        a.primary_name
+                            .display()
+                            .cmp(&b.primary_name.display())
+                    });
+                    for p in results {
+                        let h = p.handle.clone();
+                        let display = format!(
+                            "{} ({})",
+                            p.primary_name.display(),
+                            p.gramps_id
+                        );
+                        search_section = search_section.push(
+                            button(text(display).size(12))
+                                .on_press(Message::AddPickExisting(h))
+                                .padding(4)
+                                .width(Length::Fill),
+                        );
+                    }
+                }
+            }
+        }
+
         let buttons = row![
-            button(text("Save")).on_press(Message::TreeSubmitAdd),
+            button(text(if add.existing_handle.is_some() {
+                "Link"
+            } else {
+                "Save"
+            }))
+            .on_press(Message::TreeSubmitAdd),
             button(text("Cancel")).on_press(Message::TreeCancelAdd),
         ]
         .spacing(12);
 
+        // Other parent section (only for adding a child).
+        let mut other_parent_section: Column<'_, Message> = column![].spacing(4);
+        if matches!(add.relationship, AddRelationship::Child) {
+            if let Some(ref op_h) = add.other_parent_handle {
+                let op_name = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.person(op_h))
+                    .map(|p| p.primary_name.display())
+                    .unwrap_or_else(|| op_h.clone());
+                other_parent_section = other_parent_section
+                    .push(label("Other parent:"))
+                    .push(
+                        row![
+                            text(op_name).size(13),
+                            button(text("Clear").size(11))
+                                .on_press(Message::AddClearOtherParent)
+                                .padding(4),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    );
+            } else {
+                other_parent_section = other_parent_section
+                    .push(label("Other parent (optional)"))
+                    .push(
+                        text_input("Search by name...", &add.other_parent_search)
+                            .on_input(Message::AddOtherParentSearch)
+                            .padding(6),
+                    );
+                if add.other_parent_search.len() >= 2 {
+                    if let Some(snap) = &self.snapshot {
+                        let query = add.other_parent_search.to_lowercase();
+                        let results: Vec<_> = snap
+                            .persons
+                            .iter()
+                            .filter(|p| {
+                                p.handle != add.target_handle
+                                    && p.primary_name.display().to_lowercase().contains(&query)
+                            })
+                            .take(6)
+                            .collect();
+                        for p in results {
+                            let h = p.handle.clone();
+                            let display = format!(
+                                "{} ({})",
+                                p.primary_name.display(),
+                                p.gramps_id
+                            );
+                            other_parent_section = other_parent_section.push(
+                                button(text(display).size(12))
+                                    .on_press(Message::AddPickOtherParent(h))
+                                    .padding(4)
+                                    .width(Length::Fill),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut form_col: Column<'_, Message> = column![title].spacing(12);
+        form_col = form_col.push(search_section);
+        if add.existing_handle.is_none() {
+            form_col = form_col
+                .push(first_name_field)
+                .push(surname_field)
+                .push(gender_field)
+                .push(row![birth_field, death_field].spacing(16))
+                .push(source_field);
+        }
+        if matches!(add.relationship, AddRelationship::Child) {
+            form_col = form_col.push(other_parent_section);
+        }
+        form_col = form_col.push(buttons);
+
         let card = container(
-            column![
-                title,
-                first_name_field,
-                surname_field,
-                gender_field,
-                row![birth_field, death_field].spacing(16),
-                source_field,
-                buttons,
-            ]
-            .spacing(12)
+            form_col
             .padding(24)
             .max_width(420),
         )
@@ -2523,18 +2800,8 @@ async fn save_async(db: Arc<Database>, session: EditSession) -> Result<Snapshot,
             }
             EditDraft::Person(draft) => {
                 let gender = draft.gender_s.parse().unwrap_or(2);
-                let birth = draft
-                    .birth_year_s
-                    .trim()
-                    .parse::<i32>()
-                    .ok()
-                    .filter(|y| *y != 0);
-                let death = draft
-                    .death_year_s
-                    .trim()
-                    .parse::<i32>()
-                    .ok()
-                    .filter(|y| *y != 0);
+                let birth = parse_date_input(&draft.birth_date_s);
+                let death = parse_date_input(&draft.death_date_s);
                 match session.handle {
                     Some(h) => {
                         dbrepo::person::update(
@@ -2761,44 +3028,49 @@ async fn delete_async(
 /// Run the add-person-with-relationship action from the modal form.
 async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, String> {
     let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
-        let gender: i32 = add.gender_s.parse().unwrap_or(2);
-        let birth = add.birth_year_s.trim().parse::<i32>().ok().filter(|y| *y != 0);
-        let death = add.death_year_s.trim().parse::<i32>().ok().filter(|y| *y != 0);
-
         db.write_txn(|txn| {
-            let mut person = dbrepo::person::create(
-                txn,
-                &add.first_name,
-                &add.surname,
-                gender,
-                birth,
-                death,
-            )?;
+            let person_handle = if let Some(existing) = &add.existing_handle {
+                // Link an existing person instead of creating a new one.
+                existing.clone()
+            } else {
+                let gender: i32 = add.gender_s.parse().unwrap_or(2);
+                let birth = parse_date_input(&add.birth_date_s);
+                let death = parse_date_input(&add.death_date_s);
 
-            // Auto-create Source + Citation if a source URL was provided.
-            let source_url = add.source_url.trim();
-            if !source_url.is_empty() {
-                let src = dbrepo::source::create(txn, source_url, "", "", "")?;
-                let cit = dbrepo::citation::create(txn, &src.handle, source_url, 2, None)?;
-                // Attach the citation to the person's citation_list and
-                // rewrite the person row.
-                person.citation_list.push(cit.handle);
-                dbrepo::person::save_row(txn, &mut person)?;
-            }
+                let mut person = dbrepo::person::create(
+                    txn,
+                    &add.first_name,
+                    &add.surname,
+                    gender,
+                    birth,
+                    death,
+                )?;
 
+                let source_url = add.source_url.trim();
+                if !source_url.is_empty() {
+                    let src = dbrepo::source::create(txn, source_url, "", "", "")?;
+                    let cit = dbrepo::citation::create(txn, &src.handle, source_url, 2, None)?;
+                    person.citation_list.push(cit.handle);
+                    dbrepo::person::save_row(txn, &mut person)?;
+                }
+                person.handle.clone()
+            };
+
+            let gender: i32 = add.gender_s.parse().unwrap_or(2);
             match add.relationship {
                 AddRelationship::Child => {
-                    dbrepo::relationships::add_child_existing(
+                    dbrepo::relationships::add_child_with_parents(
                         txn,
                         &add.target_handle,
-                        &person.handle,
+                        &person_handle,
+                        add.other_parent_handle.as_deref(),
                     )?;
                 }
                 AddRelationship::Father | AddRelationship::Mother => {
                     dbrepo::relationships::add_parent_existing(
                         txn,
                         &add.target_handle,
-                        &person.handle,
+                        &person_handle,
                         gender,
                     )?;
                 }
@@ -2806,7 +3078,7 @@ async fn tree_add_async(db: Arc<Database>, add: PendingAdd) -> Result<Snapshot, 
                     dbrepo::relationships::add_sibling_existing(
                         txn,
                         &add.target_handle,
-                        &person.handle,
+                        &person_handle,
                     )?;
                 }
             }
@@ -2829,8 +3101,8 @@ fn default_draft_for(view: View) -> EditDraft {
             surname: String::new(),
             // Gender::Unknown = 2
             gender_s: "2".to_string(),
-            birth_year_s: String::new(),
-            death_year_s: String::new(),
+            birth_date_s: String::new(),
+            death_date_s: String::new(),
         }),
         View::Families => EditDraft::Family(FamilyDraft {
             father_gid: String::new(),
@@ -2882,5 +3154,75 @@ fn default_draft_for(view: View) -> EditDraft {
         // won't actually reach this branch because the "New" button is
         // gated on an editable view.
         _ => EditDraft::Tag(TagDraft::default()),
+    }
+}
+
+// ---- date parsing helpers ------------------------------------------------
+
+const MONTH_NAMES: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun",
+    "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+/// Parse a user-typed date string into a Gramps Date.
+/// Accepts: "20 Jan 1992", "Jan 1992", "1992".
+fn parse_date_input(s: &str) -> Option<crate::gramps::date::Date> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Year only: "1992"
+    if let Ok(y) = s.parse::<i32>() {
+        if y == 0 { return None; }
+        return Some(crate::db::repo::event::make_date(0, 0, y));
+    }
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    match parts.len() {
+        // "20 Jan 1992"
+        3 => {
+            let day = parts[0].parse::<i32>().ok()?;
+            let month = parse_month_name(parts[1])?;
+            let year = parts[2].parse::<i32>().ok()?;
+            Some(crate::db::repo::event::make_date(day, month, year))
+        }
+        // "Jan 1992"
+        2 => {
+            let month = parse_month_name(parts[0])?;
+            let year = parts[1].parse::<i32>().ok()?;
+            Some(crate::db::repo::event::make_date(0, month, year))
+        }
+        _ => None,
+    }
+}
+
+fn parse_month_name(s: &str) -> Option<i32> {
+    let lower = s.to_lowercase();
+    MONTH_NAMES
+        .iter()
+        .position(|m| lower.starts_with(m))
+        .map(|i| i as i32 + 1)
+}
+
+/// Format a Date back into the "DD Mon YYYY" string for the edit field.
+fn format_date_for_edit(date: &crate::gramps::date::Date) -> String {
+    use crate::gramps::date::DateVal;
+    let (day, month, year) = match &date.dateval {
+        Some(DateVal::Simple(d, m, y, _)) => (*d, *m, *y),
+        Some(DateVal::Range(d, m, y, _, _, _, _, _)) => (*d, *m, *y),
+        None => (0, 0, date.year.unwrap_or(0)),
+    };
+    if year == 0 {
+        return String::new();
+    }
+    let month_name = if month >= 1 && month <= 12 {
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][(month - 1) as usize]
+    } else {
+        ""
+    };
+    match (day > 0, month > 0) {
+        (true, true) => format!("{day} {month_name} {year}"),
+        (false, true) => format!("{month_name} {year}"),
+        _ => format!("{year}"),
     }
 }

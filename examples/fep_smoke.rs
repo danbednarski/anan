@@ -18,8 +18,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use gramps_desktop::db::{repo, Database};
-use gramps_desktop::gramps::date::{Date, DateVal};
+use anan::db::{repo, Database};
+use anan::db::repo::event::make_date;
+use anan::gramps::date::{Date, DateVal};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -89,12 +90,12 @@ fn main() -> Result<()> {
     // ---- create two persons and a family --------------------------------
     let dad = db
         .write_txn(|txn| {
-            repo::person::create(txn, "Alpha", "Smoke", 1, Some(1880), None)
+            repo::person::create(txn, "Alpha", "Smoke", 1, Some(make_date(0, 0, 1880)), None)
         })
         .context("create dad")?;
     let mom = db
         .write_txn(|txn| {
-            repo::person::create(txn, "Beta", "Smoke", 0, Some(1882), None)
+            repo::person::create(txn, "Beta", "Smoke", 0, Some(make_date(0, 0, 1882)), None)
         })
         .context("create mom")?;
     let family = db
@@ -174,7 +175,7 @@ fn main() -> Result<()> {
     // ---- update family (swap mother for a new one) ----------------------
     let new_mom = db
         .write_txn(|txn| {
-            repo::person::create(txn, "Gamma", "Smoke", 0, Some(1884), None)
+            repo::person::create(txn, "Gamma", "Smoke", 0, Some(make_date(0, 0, 1884)), None)
         })
         .context("create replacement mom")?;
     let fh = family.handle.clone();

@@ -1,67 +1,38 @@
 # anan
 
-Native macOS desktop genealogy app for Gramps trees. Two binaries:
+A native macOS desktop app for Gramps family trees. It reads and writes the Gramps 6.x SQLite format directly, so there's no backend, no sync daemon, and no separate process to keep alive. The same crate ships a CLI binary so scripts and agents can do the same things from a shell.
 
-- **`anan`** — the iced-based GUI. Open a Gramps SQLite file, see a canvas
-  family tree, click around. This is the day-to-day surface.
-- **`anan-cli`** — non-interactive CLI for scripts, agents, and LLMs. Every
-  read prints JSON; every write goes through a transaction with an
-  auto-snapshot of the tree first. See [`LLMS.md`](LLMS.md) for the
-  agent-facing usage guide.
+## The desktop app
 
-Both binaries link against the same library code in `src/db/` and
-`src/gramps/`, so the GUI and CLI never disagree about how a record looks.
+`cargo run --bin anan` opens a frameless window with a sidebar list of people, a canvas-based family tree in the main panel, and a right-click context menu for adding parents, children, siblings, or editing details. The tree aligns generations on horizontal rows and draws Bezier curves for parent-child connectors, with card borders colored by gender. The same panel toggles to a flat list view for keyboard-friendly browsing, and the sidebar has inline search.
 
-## Quick start
+All ten primary Gramps types (person, family, event, place, source, citation, media, note, repository, tag) load on open and write through one transactional path. Adding a person via the modal wires up birth and death events, an optional source citation, and the relevant family edges in a single commit. Every write first auto-snapshots the tree to `<file>.bak-<unix>` if the last snapshot is older than 5 minutes, keeping the 10 most recent.
 
-```bash
-cargo run --bin anan                     # GUI
-cargo run --bin anan-cli -- stats        # CLI, $ANAN_TREE must be set
-ANAN_TREE=~/family.db cargo run --bin anan-cli -- stats
+The window uses macOS' transparent titlebar with the fullsize content view, so it fits the platform look without losing the traffic-light buttons.
+
+## The CLI
+
+`anan-cli` is the same library with a clap shell on top. Every read prints JSON to stdout and every write goes through the same auto-snapshot path. Point it at a tree with `--tree <path>` or set `ANAN_TREE` once per shell.
+
 ```
-
-A short tour of the CLI:
-
-```bash
-anan-cli stats                           # row counts per primary type
-anan-cli person list --limit 5
-anan-cli person get I0001                # by gramps_id or 32-char handle
-anan-cli search "Smith"                  # substring across persons + places
+anan-cli stats
+anan-cli person list --limit 10
+anan-cli person get I0001
 anan-cli person add --first Jane --surname Doe --gender female --birth 1990-05-15
 anan-cli family add --father I0001 --mother I0002 --rel married
 anan-cli family add-child F0007 I0048
-anan-cli event add --type Marriage --date 2010-06-01 --place P0003
+anan-cli search "Smith"
+anan-cli dump --table event > events.json
 ```
 
-## Crate layout
+Identifiers can be either the 32-character handle or the Gramps ID (`I0001`, `F0007`, `E0011`, `P0003`). Pass `--compact` for one-line JSON. `LLMS.md` has the agent-facing reference covering how dates, event types, family relationship types, and place types are encoded.
 
-```
-src/
-  lib.rs           re-exports db, gramps, app, theme, views
-  main.rs          GUI binary (iced)
-  bin/cli.rs       CLI binary (clap)
-  db/
-    database.rs    open + write_txn + auto-snapshot
-    repo/          per-type CRUD (person, family, event, place, source, ...)
-  gramps/          serde structs for the Gramps 6.x JSON object model
-  app.rs / views/  GUI state machine and canvas tree (not used by the CLI)
-```
+## Building
 
-## Schema
+Rust 1.80 or later. `cargo build --release` builds both binaries. The CLI works on any platform Rust supports, but the iced GUI has only been used on macOS (Apple Silicon, Darwin 25.x).
 
-anan supports Gramps schema version **21** only (Gramps 6.0.x). Opening
-any other version refuses with a loud error rather than risking silent
-data loss. The Rust structs in `src/gramps/` were modeled against that
-single version's JSON layout.
+anan only opens Gramps 6.x trees (schema version 21). Older or newer versions are refused on open rather than risking silent data loss. If you need to read an older tree, open it in Gramps proper once and let it migrate.
 
-## Safety
+## Data
 
-Every write transaction first writes a `<tree>.bak-<unix>` snapshot if
-the last snapshot is older than 5 minutes. The 10 most recent snapshots
-are kept, older ones pruned. This is a guard against bugs in this
-codebase, not a substitute for your real backup strategy.
-
-## Data is yours
-
-`*.db`, `*.sqlite`, and `test-fixtures/` are gitignored. **Never commit
-your tree** — it contains real people's names, dates, and places.
+`*.db`, `*.sqlite`, and `test-fixtures/` are gitignored so a tree never lands in the repo. The auto-snapshots are a safety net for bugs in this codebase, not a real backup strategy.

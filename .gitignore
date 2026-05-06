@@ -1,3 +1,9 @@
 /target
-*.db.bak-*
 .DS_Store
+
+# Never commit Gramps trees or any SQLite databases - those are user data.
+*.db
+*.db.bak-*
+*.sqlite
+*.sqlite-*
+test-fixtures/
